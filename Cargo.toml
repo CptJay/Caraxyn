@@ -1,0 +1,17 @@
+[workspace]
+members = ["crates/*"]
+resolver = "3"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.99"
+
+# Versions are written here once; crates opt in with `dep = { workspace = true }`.
+[workspace.dependencies]
+
+# Rules written once; crates opt in with `[lints] workspace = true`.
+# Clippy runs at its default level (see CI: `-D warnings`).
+[workspace.lints.rust]
+unsafe_code = "forbid"
+missing_docs = "warn"
