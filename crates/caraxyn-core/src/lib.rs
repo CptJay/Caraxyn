@@ -1,5 +1,7 @@
 //! Caraxyn core: everything except the GUI.
 
+pub mod ids;
+
 /// Name of this crate, as Cargo knows it.
 pub fn crate_name() -> &'static str {
     tracing::trace!("crate_name called");
