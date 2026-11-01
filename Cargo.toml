@@ -12,6 +12,8 @@ rust-version = "1.99"
 hex = "0.4.3"
 # Pinned exactly: the iroh crates move fast and must match each other.
 iroh = "=1.4.1"
+iroh-blobs = "=0.104.0"
+tempfile = "3.27.0"
 thiserror = "2.0.21"
 tokio = { version = "1.54.1", features = ["rt-multi-thread", "macros"] }
 tracing = "0.1.44"
