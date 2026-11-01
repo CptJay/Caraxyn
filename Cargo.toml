@@ -9,6 +9,8 @@ rust-version = "1.99"
 
 # Versions are written here once; crates opt in with `dep = { workspace = true }`.
 [workspace.dependencies]
+hex = "0.4.3"
+thiserror = "2.0.21"
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 
