@@ -72,7 +72,6 @@ impl FromStr for PeerId {
     type Err = ParsePeerIdError;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        
         // Helper to avoid repeating the length check in the error message.
         fn is_correct_length(s: &str) -> bool {
             s.len() == PEER_ID_LEN * 2
