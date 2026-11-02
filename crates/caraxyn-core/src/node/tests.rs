@@ -343,3 +343,185 @@ async fn export_rejects_a_hostile_name_and_writes_nothing() {
     assert_eq!(std::fs::read_dir(&inner).unwrap().count(), 0);
     node.node.shutdown().await.unwrap();
 }
+
+/// Builds `photos/{a.jpg, .hidden, trip/b.jpg, trip/deep/c.jpg}` and returns the dir holding `photos`.
+fn photo_tree() -> TempDir {
+    let dir = TempDir::new().unwrap();
+    let photos = dir.path().join("photos");
+    std::fs::create_dir_all(photos.join("trip/deep")).unwrap();
+    std::fs::write(photos.join("a.jpg"), b"a").unwrap();
+    std::fs::write(photos.join(".hidden"), b"h").unwrap();
+    std::fs::write(photos.join("trip/b.jpg"), b"b").unwrap();
+    std::fs::write(photos.join("trip/deep/c.jpg"), vec![7u8; 1 << 20]).unwrap();
+    dir
+}
+
+#[tokio::test]
+async fn a_folder_round_trips() {
+    let lookup = MemoryLookup::new();
+    let (a, b) = (offline_node(&lookup).await, offline_node(&lookup).await);
+    let src = photo_tree();
+    let root = a
+        .node
+        .share_folder(&src.path().join("photos"))
+        .await
+        .unwrap();
+    a.node.allow(b.node.peer_id());
+    b.node.fetch(a.node.peer_id(), root).await.unwrap();
+    let out = TempDir::new().unwrap();
+
+    let written = b.node.export(root, out.path()).await.unwrap();
+
+    assert_eq!(written.len(), 4);
+    let p = out.path().join("photos");
+    assert_eq!(std::fs::read(p.join("a.jpg")).unwrap(), b"a");
+    assert_eq!(std::fs::read(p.join(".hidden")).unwrap(), b"h");
+    assert_eq!(std::fs::read(p.join("trip/b.jpg")).unwrap(), b"b");
+    assert_eq!(
+        std::fs::read(p.join("trip/deep/c.jpg")).unwrap().len(),
+        1 << 20
+    );
+    a.node.shutdown().await.unwrap();
+    b.node.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn same_folder_gives_same_hash_whatever_the_creation_order() {
+    let a = offline_node(&MemoryLookup::new()).await;
+    let make = |order: [&str; 3]| {
+        let dir = TempDir::new().unwrap();
+        std::fs::create_dir(dir.path().join("d")).unwrap();
+        for n in order {
+            std::fs::write(dir.path().join("d").join(n), n).unwrap();
+        }
+        dir
+    };
+    let (one, two) = (make(["x", "y", "z"]), make(["z", "y", "x"]));
+
+    let h1 = a.node.share_folder(&one.path().join("d")).await.unwrap();
+    let h2 = a.node.share_folder(&two.path().join("d")).await.unwrap();
+
+    assert_eq!(h1, h2);
+    a.node.shutdown().await.unwrap();
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn symlinks_are_not_shared() {
+    let a = offline_node(&MemoryLookup::new()).await;
+    let dir = TempDir::new().unwrap();
+    let secret = dir.path().join("secret.txt");
+    std::fs::write(&secret, b"secret").unwrap();
+    let d = dir.path().join("d");
+    std::fs::create_dir(&d).unwrap();
+    std::fs::write(d.join("ok.txt"), b"ok").unwrap();
+    std::os::unix::fs::symlink(&secret, d.join("link.txt")).unwrap();
+    std::os::unix::fs::symlink(dir.path(), d.join("loop")).unwrap();
+
+    let root = a.node.share_folder(&d).await.unwrap();
+
+    let names: Vec<_> = read_share(&a.node, root)
+        .await
+        .into_iter()
+        .map(|e| e.0)
+        .collect();
+    assert_eq!(names, vec!["d/ok.txt"]);
+    a.node.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn an_empty_folder_shares_nothing() {
+    let a = offline_node(&MemoryLookup::new()).await;
+    let dir = TempDir::new().unwrap();
+    std::fs::create_dir(dir.path().join("empty")).unwrap();
+
+    let root = a
+        .node
+        .share_folder(&dir.path().join("empty"))
+        .await
+        .unwrap();
+    let out = TempDir::new().unwrap();
+
+    assert!(a.node.export(root, out.path()).await.unwrap().is_empty());
+    assert_eq!(std::fs::read_dir(out.path()).unwrap().count(), 0);
+    a.node.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn hostile_folder_entries_are_rejected_and_write_nothing() {
+    let node = offline_node(&MemoryLookup::new()).await;
+    for name in ["a/../../evil", "/abs", "a//b", "a/CON", "a/"] {
+        let root = share_with_name(&node.node, name, b"x").await;
+        let out = TempDir::new().unwrap();
+
+        let result = node.node.export(root, out.path()).await;
+
+        assert!(
+            matches!(result, Err(Error::UnsafeName { .. })),
+            "{name}: {result:?}"
+        );
+        assert_eq!(std::fs::read_dir(out.path()).unwrap().count(), 0, "{name}");
+    }
+    node.node.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn export_refuses_an_existing_top_level_folder() {
+    let a = offline_node(&MemoryLookup::new()).await;
+    let src = photo_tree();
+    let root = a
+        .node
+        .share_folder(&src.path().join("photos"))
+        .await
+        .unwrap();
+    let out = TempDir::new().unwrap();
+    std::fs::create_dir(out.path().join("photos")).unwrap();
+
+    let result = a.node.export(root, out.path()).await;
+
+    assert!(
+        matches!(result, Err(Error::AlreadyExists(_))),
+        "got {result:?}"
+    );
+    assert_eq!(
+        std::fs::read_dir(out.path().join("photos"))
+            .unwrap()
+            .count(),
+        0
+    );
+    a.node.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn a_file_and_a_folder_with_the_same_name_conflict() {
+    let node = offline_node(&MemoryLookup::new()).await;
+    let blob = node
+        .node
+        .store
+        .blobs()
+        .add_bytes("x")
+        .temp_tag()
+        .await
+        .unwrap();
+    for names in [["a", "a/b"], ["a/b", "a"], ["a", "a"]] {
+        let root = Collection::from_iter(names.map(|n| (n.to_owned(), blob.hash())))
+            .store(&node.node.store)
+            .await
+            .unwrap();
+        let out = TempDir::new().unwrap();
+
+        let result = node.node.export(root.hash().into(), out.path()).await;
+
+        assert!(
+            matches!(
+                &result,
+                Err(Error::UnsafeName {
+                    reason: safe_name::NameError::Conflict,
+                    ..
+                })
+            ),
+            "{names:?}: {result:?}"
+        );
+    }
+    node.node.shutdown().await.unwrap();
+}

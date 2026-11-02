@@ -36,9 +36,9 @@ pub enum NameError {
     /// The name is longer than 255 bytes.
     #[error("the name is {0} bytes, the limit is 255")]
     TooLong(usize),
-    /// Two entries in the share have this name.
-    #[error("another entry has the same name")]
-    Duplicate,
+    /// Another entry has the same name, or is a file where this one needs a folder.
+    #[error("conflicts with another entry (same name, or a file and a folder)")]
+    Conflict,
 }
 
 /// Returns `Ok(())` if `name` is safe to use as a single file name.
