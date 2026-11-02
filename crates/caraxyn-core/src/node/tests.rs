@@ -13,6 +13,11 @@ struct TestNode {
 /// Starts an offline node (no discovery, no relay) that other test nodes can
 /// find through `lookup`.
 async fn offline_node(lookup: &MemoryLookup) -> TestNode {
+    // Shows logs with: RUST_LOG=caraxyn_core=debug cargo test -- --nocapture
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+        .with_test_writer()
+        .try_init();
     let dir = TempDir::new().unwrap();
     let node = Node::spawn_with(
         NodeConfig::new(dir.path()),
@@ -107,7 +112,7 @@ async fn missing_file_is_an_error() {
 
     let result = a.node.share_file(&a._dir.path().join("nope")).await;
 
-    assert!(matches!(result, Err(Error::Io(_))));
+    assert!(matches!(result, Err(Error::Io { .. })));
     a.node.shutdown().await.unwrap();
 }
 
@@ -320,7 +325,7 @@ async fn export_into_a_missing_folder_fails() {
 
     let result = b.node.export(root, &b._dir.path().join("nope")).await;
 
-    assert!(matches!(result, Err(Error::Io(_))), "got {result:?}");
+    assert!(matches!(result, Err(Error::Io { .. })), "got {result:?}");
     a.node.shutdown().await.unwrap();
     b.node.shutdown().await.unwrap();
 }
@@ -524,4 +529,85 @@ async fn a_file_and_a_folder_with_the_same_name_conflict() {
         );
     }
     node.node.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn export_accepts_a_relative_folder() {
+    let a = offline_node(&MemoryLookup::new()).await;
+    let src = photo_tree();
+    let root = a
+        .node
+        .share_folder(&src.path().join("photos"))
+        .await
+        .unwrap();
+    // A relative path to a temp dir, without changing the process-wide current dir.
+    let out = TempDir::new_in(".").unwrap();
+    let relative = Path::new(".").join(out.path().file_name().unwrap());
+
+    let written = a.node.export(root, &relative).await.unwrap();
+
+    assert_eq!(written.len(), 4);
+    assert!(out.path().join("photos/trip/b.jpg").is_file());
+    a.node.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn a_failed_export_leaves_dest_as_it_was() {
+    let node = offline_node(&MemoryLookup::new()).await;
+    let present = node
+        .node
+        .store
+        .blobs()
+        .add_bytes("a")
+        .temp_tag()
+        .await
+        .unwrap();
+    // "d/a" is written first, then "d/b" fails: its data is not in the store.
+    let missing = Hash::new(b"never added");
+    let root = Collection::from_iter([
+        ("d/a".to_owned(), present.hash()),
+        ("d/b".to_owned(), missing),
+    ])
+    .store(&node.node.store)
+    .await
+    .unwrap();
+    let out = TempDir::new().unwrap();
+
+    let result = node.node.export(root.hash().into(), out.path()).await;
+
+    assert!(matches!(result, Err(Error::Store(_))), "got {result:?}");
+    assert_eq!(std::fs::read_dir(out.path()).unwrap().count(), 0);
+    node.node.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn sharing_a_name_a_receiver_cannot_save_fails() {
+    let a = offline_node(&MemoryLookup::new()).await;
+    let dir = TempDir::new().unwrap();
+    let d = dir.path().join("d");
+    std::fs::create_dir(&d).unwrap();
+    std::fs::write(d.join("ok.txt"), b"ok").unwrap();
+    std::fs::write(d.join("notes."), b"x").unwrap();
+
+    let result = a.node.share_folder(&d).await;
+
+    assert!(
+        matches!(&result, Err(Error::UnsafeName { name, .. }) if name == "d/notes."),
+        "got {result:?}"
+    );
+    a.node.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn io_errors_name_the_path() {
+    let a = offline_node(&MemoryLookup::new()).await;
+    let missing = a._dir.path().join("nope");
+
+    let result = a.node.share_file(&missing).await;
+
+    assert!(
+        matches!(&result, Err(Error::Io { path, .. }) if *path == missing),
+        "got {result:?}"
+    );
+    a.node.shutdown().await.unwrap();
 }

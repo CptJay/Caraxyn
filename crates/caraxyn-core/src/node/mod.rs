@@ -204,10 +204,13 @@ impl Node {
     /// # Errors
     ///
     /// [`Error::Io`] if the file does not exist, [`Error::InvalidPath`] if it
-    /// has no usable name, [`Error::Store`] if the import fails.
+    /// has no usable name, [`Error::UnsafeName`] if a receiver could not save
+    /// it under that name, [`Error::Store`] if the import fails.
     pub async fn share_file(&self, path: &Path) -> Result<ContentHash, Error> {
         // The store requires an absolute path; this also fails if the file is missing.
-        let path = tokio::fs::canonicalize(path).await?;
+        let path = tokio::fs::canonicalize(path)
+            .await
+            .map_err(Error::io(path))?;
         let name = file_name(&path)?;
         self.share_entries(vec![(name, path)]).await
     }
@@ -223,18 +226,20 @@ impl Node {
     /// # Errors
     ///
     /// [`Error::Io`] if the folder or any file in it cannot be read,
-    /// [`Error::InvalidPath`] if a name is not UTF-8, [`Error::Store`] if an
-    /// import fails.
+    /// [`Error::InvalidPath`] if a name is not UTF-8, [`Error::UnsafeName`] if
+    /// a receiver could not save a name, [`Error::Store`] if an import fails.
     // shortcut: a collection only lists files, so empty folders are lost; needs a marker format to fix.
     pub async fn share_folder(&self, path: &Path) -> Result<ContentHash, Error> {
-        let root = tokio::fs::canonicalize(path).await?;
+        let root = tokio::fs::canonicalize(path)
+            .await
+            .map_err(Error::io(path))?;
         let mut entries = Vec::new();
         let mut pending = vec![(file_name(&root)?, root)];
         while let Some((name, dir)) = pending.pop() {
-            let mut read = tokio::fs::read_dir(&dir).await?;
-            while let Some(entry) = read.next_entry().await? {
+            let mut read = tokio::fs::read_dir(&dir).await.map_err(Error::io(&dir))?;
+            while let Some(entry) = read.next_entry().await.map_err(Error::io(&dir))? {
                 let child = format!("{name}/{}", file_name(&entry.path())?);
-                let kind = entry.file_type().await?;
+                let kind = entry.file_type().await.map_err(Error::io(&entry.path()))?;
                 if kind.is_dir() {
                     pending.push((child, entry.path()));
                 } else if kind.is_file() {
@@ -250,6 +255,10 @@ impl Node {
 
     /// Imports each `(name, path)` and stores them as one tagged collection.
     async fn share_entries(&self, entries: Vec<(String, PathBuf)>) -> Result<ContentHash, Error> {
+        // Refuse here what the receiver's export would refuse, before importing anything.
+        for (name, _) in &entries {
+            check_name(name)?;
+        }
         let mut files = Vec::new();
         // Temp tags keep the blobs alive until the collection references them.
         let mut tags = Vec::new();
@@ -284,9 +293,8 @@ impl Node {
     /// Writes a share held in our store into the existing folder `dest`.
     ///
     /// Every name is checked, component by component, and nothing is
-    /// overwritten before the first file is written, so a bad share leaves
-    /// `dest` untouched. Folders are created as needed. Returns the paths
-    /// written.
+    /// overwritten. Folders are created as needed. If anything fails, `dest`
+    /// is left as it was. Returns the paths written.
     ///
     /// # Errors
     ///
@@ -295,8 +303,12 @@ impl Node {
     /// already in `dest`, [`Error::Io`] if `dest` is not a folder,
     /// [`Error::Store`] if the share is not (fully) in the store.
     pub async fn export(&self, root: ContentHash, dest: &Path) -> Result<Vec<PathBuf>, Error> {
-        if !tokio::fs::metadata(dest).await?.is_dir() {
-            return Err(std::io::Error::from(std::io::ErrorKind::NotADirectory).into());
+        // iroh's export needs an absolute path; this also fails if `dest` is missing.
+        let dest = &tokio::fs::canonicalize(dest)
+            .await
+            .map_err(Error::io(dest))?;
+        if !dest.is_dir() {
+            return Err(Error::io(dest)(std::io::ErrorKind::NotADirectory.into()));
         }
         let collection = Collection::load(root.into(), &self.store)
             .await
@@ -307,13 +319,11 @@ impl Node {
         let mut dirs = HashSet::new();
         let mut top_level = HashSet::new();
         for (name, hash) in collection.iter() {
+            check_name(name)?;
             let unsafe_name = |reason| Error::UnsafeName {
                 name: name.clone(),
                 reason,
             };
-            for part in name.split('/') {
-                safe_name::check(part).map_err(unsafe_name)?;
-            }
             // shortcut: exact-match only, so names differing in case clash on case-insensitive filesystems; upgrade when that bites.
             let mut clash = dirs.contains(name.as_str()) || !files.insert(name.as_str());
             for (i, _) in name.match_indices('/') {
@@ -326,28 +336,49 @@ impl Node {
             top_level.insert(name.split('/').next().unwrap_or(name));
             targets.push((*hash, dest.join(name)));
         }
-        for first in top_level {
-            let path = dest.join(first);
+        let top_level: Vec<PathBuf> = top_level.into_iter().map(|n| dest.join(n)).collect();
+        for path in &top_level {
             // shortcut: check-then-write is racy; fine for a single-user desktop app.
-            if tokio::fs::try_exists(&path).await? {
-                return Err(Error::AlreadyExists(path));
+            if tokio::fs::try_exists(path).await.map_err(Error::io(path))? {
+                return Err(Error::AlreadyExists(path.clone()));
             }
         }
 
         let mut written = Vec::new();
         for (hash, path) in targets {
-            if let Some(parent) = path.parent() {
-                tokio::fs::create_dir_all(parent).await?;
+            if let Err(e) = self.export_one(hash, &path).await {
+                // Nothing at these paths existed before (checked above), so remove it all.
+                for top in &top_level {
+                    let removed = if top.is_dir() {
+                        tokio::fs::remove_dir_all(top).await
+                    } else {
+                        tokio::fs::remove_file(top).await
+                    };
+                    if let Err(cleanup) = removed {
+                        warn!(path = %top.display(), %cleanup, "could not clean up after a failed export");
+                    }
+                }
+                return Err(e);
             }
-            self.store
-                .blobs()
-                .export(hash, &path)
-                .await
-                .map_err(Error::store)?;
             written.push(path);
         }
         info!(share = %root.short(), files = written.len(), "share exported");
         Ok(written)
+    }
+
+    /// Writes one blob to `path`, creating its parent folders.
+    async fn export_one(&self, hash: Hash, path: &Path) -> Result<(), Error> {
+        if let Some(parent) = path.parent() {
+            tokio::fs::create_dir_all(parent)
+                .await
+                .map_err(Error::io(parent))?;
+        }
+        self.store
+            .blobs()
+            .export(hash, path)
+            .await
+            .map_err(Error::store)?;
+        Ok(())
     }
 
     /// Stops the node: closes connections and the blob store.
@@ -361,6 +392,17 @@ impl Node {
         info!(peer = %self.peer_id().short(), "node stopped");
         Ok(())
     }
+}
+
+/// Checks every `/`-separated part of a share entry name.
+fn check_name(name: &str) -> Result<(), Error> {
+    for part in name.split('/') {
+        safe_name::check(part).map_err(|reason| Error::UnsafeName {
+            name: name.to_owned(),
+            reason,
+        })?;
+    }
+    Ok(())
 }
 
 /// The last path component as UTF-8.

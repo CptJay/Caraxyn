@@ -22,8 +22,14 @@ pub enum Error {
     #[error("blob store error: {0}")]
     Store(String),
     /// A filesystem operation failed (for example the shared file does not exist).
-    #[error("io error")]
-    Io(#[from] std::io::Error),
+    #[error("io error at {}", path.display())]
+    Io {
+        /// The file or folder the operation was about.
+        path: PathBuf,
+        /// What the operating system reported.
+        #[source]
+        source: std::io::Error,
+    },
     /// The path has no file name that can be shared (or it is not valid UTF-8).
     #[error("path has no usable UTF-8 file name")]
     InvalidPath,
@@ -48,5 +54,11 @@ impl Error {
     /// Wraps a blob store error, keeping only its message.
     pub(crate) fn store(e: impl std::fmt::Display) -> Self {
         Self::Store(e.to_string())
+    }
+
+    /// For `map_err`: wraps an io error together with the path it happened at.
+    pub(crate) fn io(path: &std::path::Path) -> impl FnOnce(std::io::Error) -> Self {
+        let path = path.to_owned();
+        move |source| Self::Io { path, source }
     }
 }
