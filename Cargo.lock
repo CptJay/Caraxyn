@@ -287,6 +287,7 @@ dependencies = [
  "hex",
  "iroh",
  "iroh-blobs",
+ "redb",
  "tempfile",
  "thiserror 2.0.21",
  "tokio",

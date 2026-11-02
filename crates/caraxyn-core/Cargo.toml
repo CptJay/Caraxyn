@@ -8,6 +8,7 @@ rust-version.workspace = true
 hex = { workspace = true }
 iroh = { workspace = true }
 iroh-blobs = { workspace = true }
+redb = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
