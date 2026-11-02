@@ -45,6 +45,9 @@ pub enum Error {
         #[source]
         reason: NameError,
     },
+    /// The secret key file exists but does not hold a key. It is left as it is.
+    #[error("{} is not a valid secret key file", .0.display())]
+    InvalidKeyFile(PathBuf),
     /// Exporting would overwrite a file that already exists.
     #[error("{} already exists", .0.display())]
     AlreadyExists(PathBuf),

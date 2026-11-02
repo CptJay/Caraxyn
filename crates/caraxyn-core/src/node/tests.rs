@@ -643,3 +643,29 @@ async fn export_moves_a_received_file_out_of_the_store() {
     a.node.shutdown().await.unwrap();
     b.node.shutdown().await.unwrap();
 }
+
+#[tokio::test]
+async fn the_peer_id_survives_a_restart() {
+    let dir = TempDir::new().unwrap();
+    let start = || Node::spawn_with(NodeConfig::new(dir.path()), presets::Minimal, None);
+
+    let first = start().await.unwrap();
+    let id = first.peer_id();
+    first.shutdown().await.unwrap();
+    let second = start().await.unwrap();
+
+    assert_eq!(second.peer_id(), id);
+    second.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn a_second_node_cannot_use_the_same_data_dir() {
+    let dir = TempDir::new().unwrap();
+    let start = || Node::spawn_with(NodeConfig::new(dir.path()), presets::Minimal, None);
+    let first = start().await.unwrap();
+
+    let second = start().await;
+
+    assert!(matches!(second, Err(Error::Store(_))), "got {second:?}");
+    first.shutdown().await.unwrap();
+}

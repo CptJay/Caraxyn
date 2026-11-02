@@ -55,7 +55,8 @@ impl From<ContentHash> for Hash {
 /// Settings for [`Node::spawn`].
 #[derive(Clone, Debug)]
 pub struct NodeConfig {
-    /// Directory where the node keeps its data (the blob store).
+    /// Directory where the node keeps its data: the blob store and the
+    /// secret key that is its identity.
     pub data_dir: PathBuf,
 }
 
@@ -80,13 +81,17 @@ pub struct Node {
 }
 
 impl Node {
-    /// Starts a node with a fresh identity, using iroh's default discovery
-    /// and relay servers.
+    /// Starts a node, using iroh's default discovery and relay servers.
+    ///
+    /// The identity is loaded from `data_dir/secret.key`, or created there on
+    /// the first start, so the [`PeerId`] stays the same across restarts.
     ///
     /// # Errors
     ///
-    /// Returns [`Error::Bind`] if the network endpoint cannot be started, or
-    /// [`Error::Store`] if the blob store cannot be opened.
+    /// Returns [`Error::Bind`] if the network endpoint cannot be started,
+    /// [`Error::Store`] if the blob store cannot be opened,
+    /// [`Error::InvalidKeyFile`] if the key file is damaged, or [`Error::Io`]
+    /// if it cannot be read or written.
     pub async fn spawn(config: NodeConfig) -> Result<Self, Error> {
         Self::spawn_with(config, presets::N0, None).await
     }
@@ -101,7 +106,9 @@ impl Node {
             .await
             .map_err(Error::store)?
             .into();
-        let mut builder = Endpoint::builder(preset);
+        // After the store: it locks `data_dir`, so two nodes never race to create the key.
+        let key = key::load_or_create(&config.data_dir.join("secret.key"))?;
+        let mut builder = Endpoint::builder(preset).secret_key(key);
         if let Some(lookup) = lookup {
             builder = builder.address_lookup(lookup);
         }
@@ -434,6 +441,8 @@ fn file_name(path: &Path) -> Result<String, Error> {
         .map(str::to_owned)
         .ok_or(Error::InvalidPath)
 }
+
+mod key;
 
 #[cfg(test)]
 mod tests;
