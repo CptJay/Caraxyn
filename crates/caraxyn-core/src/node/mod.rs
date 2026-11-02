@@ -334,7 +334,11 @@ impl Node {
                 return Err(unsafe_name(safe_name::NameError::Conflict));
             }
             top_level.insert(name.split('/').next().unwrap_or(name));
-            targets.push((*hash, dest.join(name)));
+            // Part by part: Windows' `\\?\` paths from canonicalize do not treat `/` as a separator.
+            let path = name
+                .split('/')
+                .fold(dest.to_path_buf(), |p, part| p.join(part));
+            targets.push((*hash, path));
         }
         let top_level: Vec<PathBuf> = top_level.into_iter().map(|n| dest.join(n)).collect();
         for path in &top_level {
@@ -354,7 +358,10 @@ impl Node {
                     } else {
                         tokio::fs::remove_file(top).await
                     };
-                    if let Err(cleanup) = removed {
+                    // NotFound: the write failed before reaching this entry.
+                    if let Err(cleanup) = removed
+                        && cleanup.kind() != std::io::ErrorKind::NotFound
+                    {
                         warn!(path = %top.display(), %cleanup, "could not clean up after a failed export");
                     }
                 }
