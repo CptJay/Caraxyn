@@ -15,7 +15,7 @@ iroh = "=1.4.1"
 iroh-blobs = "=0.104.0"
 tempfile = "3.27.0"
 thiserror = "2.0.21"
-tokio = { version = "1.54.1", features = ["rt-multi-thread", "macros"] }
+tokio = { version = "1.54.1", features = ["rt-multi-thread", "macros", "fs", "time"] }
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 
