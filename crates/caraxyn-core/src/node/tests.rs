@@ -580,6 +580,8 @@ async fn a_failed_export_leaves_dest_as_it_was() {
     node.node.shutdown().await.unwrap();
 }
 
+// Unix only: Windows strips the trailing dot, so it cannot even create `notes.`.
+#[cfg(unix)]
 #[tokio::test]
 async fn sharing_a_name_a_receiver_cannot_save_fails() {
     let a = offline_node(&MemoryLookup::new()).await;

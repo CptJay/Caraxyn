@@ -313,11 +313,11 @@ impl Node {
     /// already in `dest`, [`Error::Io`] if `dest` is not a folder,
     /// [`Error::Store`] if the share is not (fully) in the store.
     pub async fn export(&self, root: ContentHash, dest: &Path) -> Result<Vec<PathBuf>, Error> {
-        // iroh's export needs an absolute path; this also fails if `dest` is missing.
-        let dest = &tokio::fs::canonicalize(dest)
-            .await
-            .map_err(Error::io(dest))?;
-        if !dest.is_dir() {
+        // iroh's export needs an absolute path. Not canonicalize: on Windows it
+        // gives `\\?\C:\...` paths, which would end up in the returned paths.
+        let dest = &std::path::absolute(dest).map_err(Error::io(dest))?;
+        let meta = tokio::fs::metadata(dest).await.map_err(Error::io(dest))?;
+        if !meta.is_dir() {
             return Err(Error::io(dest)(std::io::ErrorKind::NotADirectory.into()));
         }
         let collection = Collection::load(root.into(), &self.store)
@@ -344,7 +344,7 @@ impl Node {
                 return Err(unsafe_name(safe_name::NameError::Conflict));
             }
             top_level.insert(name.split('/').next().unwrap_or(name));
-            // Part by part: Windows' `\\?\` paths from canonicalize do not treat `/` as a separator.
+            // Part by part, so each piece is joined with the platform's own separator.
             let path = name
                 .split('/')
                 .fold(dest.to_path_buf(), |p, part| p.join(part));
