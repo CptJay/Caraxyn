@@ -4,9 +4,14 @@
 //!
 //! ```text
 //! cargo run --example transfer -- <data-dir> id
+//! cargo run --example transfer -- <data-dir> invite <my-name>
+//! cargo run --example transfer -- <data-dir> join <code> <my-name>
 //! cargo run --example transfer -- <data-dir> share <path> [<allowed-peer-id>...]
 //! cargo run --example transfer -- <data-dir> get <peer-id> <hash> <dest-folder>
 //! ```
+//!
+//! Contacts (made with `invite` and `join`) may fetch every share, so `share`
+//! needs no peer ids for them.
 //!
 //! More logs: `RUST_LOG=iroh=info,caraxyn_core=debug`.
 
@@ -19,6 +24,8 @@ use caraxyn_core::{
 use tracing_subscriber::EnvFilter;
 
 const USAGE: &str = "usage: transfer <data-dir> id
+       transfer <data-dir> invite <my-name>
+       transfer <data-dir> join <code> <my-name>
        transfer <data-dir> share <path> [<allowed-peer-id>...]
        transfer <data-dir> get <peer-id> <hash> <dest-folder>";
 
@@ -50,7 +57,7 @@ async fn start(args: &[&str]) -> Result<(), Box<dyn Error>> {
         return Err(USAGE.into());
     };
     // Checked before spawning, so a typo does not create a data folder and identity.
-    if !matches!(*command, "id" | "share" | "get") {
+    if !matches!(*command, "id" | "invite" | "join" | "share" | "get") {
         return Err(USAGE.into());
     }
     let node = Node::spawn(NodeConfig::new(data_dir)).await?;
@@ -63,9 +70,22 @@ async fn start(args: &[&str]) -> Result<(), Box<dyn Error>> {
 async fn run(node: &Node, command: &str, rest: &[&str]) -> Result<(), Box<dyn Error>> {
     match (command, rest) {
         ("id", []) => println!("{}", node.peer_id()),
+        ("invite", [my_name]) => {
+            println!("send this one-time code to the other side (valid 24 hours):");
+            println!("  {}", node.create_invite(my_name)?);
+            println!("on the other side run:");
+            println!("  cargo run --example transfer -- <data-dir> join <code> <their-name>");
+            // Online until Enter: the other side's `join` has to reach this node.
+            println!("press Enter to stop (after they joined)");
+            wait_for_enter().await?;
+        }
+        ("join", [code, my_name]) => {
+            let contact = node.redeem_invite(code, my_name).await?;
+            println!("contact added: {} (peer {})", contact.name, contact.peer);
+        }
         ("share", [path, allowed @ ..]) => {
             for peer in allowed {
-                node.allow(parse::<PeerId>("allowed peer id", peer)?);
+                node.allow(parse::<PeerId>("allowed peer id", peer)?)?;
             }
             let path = Path::new(path);
             let hash = if path.is_dir() {
@@ -73,19 +93,19 @@ async fn run(node: &Node, command: &str, rest: &[&str]) -> Result<(), Box<dyn Er
             } else {
                 node.share_file(path).await?
             };
-            println!("sharing {} with {} peer(s)", path.display(), allowed.len());
+            let contacts = node.contacts()?.len();
+            println!(
+                "sharing {} with {contacts} contact(s) and {} other peer(s)",
+                path.display(),
+                allowed.len()
+            );
             println!("on the other side run:");
             println!(
                 "  cargo run --example transfer -- <data-dir> get {} {hash} <dest-folder>",
                 node.peer_id()
             );
             println!("press Enter to stop");
-            let read =
-                tokio::task::spawn_blocking(|| std::io::stdin().read_line(&mut String::new()));
-            // 0 bytes: stdin is closed (background, no terminal), so serve until killed.
-            if read.await?? == 0 {
-                std::future::pending::<()>().await;
-            }
+            wait_for_enter().await?;
         }
         ("get", [peer, hash, dest]) => {
             let peer = parse::<PeerId>("peer id", peer)?;
@@ -98,6 +118,16 @@ async fn run(node: &Node, command: &str, rest: &[&str]) -> Result<(), Box<dyn Er
             }
         }
         _ => return Err(USAGE.into()),
+    }
+    Ok(())
+}
+
+/// Waits until Enter is pressed, or forever when stdin is closed (background,
+/// no terminal), so the node keeps serving until it is killed.
+async fn wait_for_enter() -> Result<(), Box<dyn Error>> {
+    let read = tokio::task::spawn_blocking(|| std::io::stdin().read_line(&mut String::new()));
+    if read.await?? == 0 {
+        std::future::pending::<()>().await;
     }
     Ok(())
 }
