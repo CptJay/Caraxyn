@@ -611,3 +611,35 @@ async fn io_errors_name_the_path() {
     );
     a.node.shutdown().await.unwrap();
 }
+
+/// Total size of all files under `dir`.
+fn disk_usage(dir: &Path) -> u64 {
+    std::fs::read_dir(dir)
+        .unwrap()
+        .map(|e| e.unwrap())
+        .map(|e| match e.file_type().unwrap().is_dir() {
+            true => disk_usage(&e.path()),
+            false => e.metadata().unwrap().len(),
+        })
+        .sum()
+}
+
+#[tokio::test]
+async fn export_moves_a_received_file_out_of_the_store() {
+    let content = vec![5u8; 3 << 20];
+    let (a, b, root) = fetched(&content, "big.bin").await;
+    let store_dir = b._dir.path().join("blobs");
+    let before = disk_usage(&store_dir);
+    let out = TempDir::new().unwrap();
+
+    b.node.export(root, out.path()).await.unwrap();
+
+    assert_eq!(std::fs::read(out.path().join("big.bin")).unwrap(), content);
+    // The store keeps its database and small metadata files, not the data.
+    assert!(
+        disk_usage(&store_dir) + (3 << 20) <= before,
+        "store still holds a copy"
+    );
+    a.node.shutdown().await.unwrap();
+    b.node.shutdown().await.unwrap();
+}

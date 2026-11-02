@@ -19,7 +19,7 @@ use iroh_blobs::{
     BlobFormat, BlobsProtocol, Hash, HashAndFormat,
     api::{
         Store,
-        blobs::{AddPathOptions, ImportMode},
+        blobs::{AddPathOptions, ExportMode, ExportOptions, ImportMode},
         downloader::Shuffled,
     },
     format::collection::Collection,
@@ -105,7 +105,10 @@ impl Node {
         if let Some(lookup) = lookup {
             builder = builder.address_lookup(lookup);
         }
-        let endpoint = builder.bind().await?;
+        let endpoint = builder
+            .bind()
+            .await
+            .map_err(|e| Error::Bind(e.to_string()))?;
         let allowed = Arc::new(RwLock::new(HashSet::new()));
         let (events, mut requests) = EventSender::channel(
             16,
@@ -374,17 +377,29 @@ impl Node {
     }
 
     /// Writes one blob to `path`, creating its parent folders.
+    ///
+    /// A blob the store owns is moved out rather than copied, so a received
+    /// file does not take its disk space twice; the store then points at
+    /// `path`.
     async fn export_one(&self, hash: Hash, path: &Path) -> Result<(), Error> {
         if let Some(parent) = path.parent() {
             tokio::fs::create_dir_all(parent)
                 .await
                 .map_err(Error::io(parent))?;
         }
-        self.store
-            .blobs()
-            .export(hash, path)
-            .await
-            .map_err(Error::store)?;
+        let export = |mode| {
+            self.store.blobs().export_with_opts(ExportOptions {
+                hash,
+                mode,
+                target: path.to_owned(),
+            })
+        };
+        // iroh falls back to copying only for Linux's cross-drive error, not
+        // for Windows' (store on C:, target on D:), so retry as a copy.
+        if let Err(e) = export(ExportMode::TryReference).await {
+            warn!(path = %path.display(), %e, "move out of the store failed, copying");
+            export(ExportMode::Copy).await.map_err(Error::store)?;
+        }
         Ok(())
     }
 
