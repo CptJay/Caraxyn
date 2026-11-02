@@ -1,7 +1,11 @@
 //! Crate-wide error type.
 
 use iroh::endpoint::BindError;
+use std::path::PathBuf;
+
 use thiserror::Error;
+
+use crate::safe_name::NameError;
 
 /// Anything that can go wrong in `caraxyn-core`.
 ///
@@ -26,6 +30,18 @@ pub enum Error {
     /// The peer id is not a valid public key.
     #[error("peer id is not a valid public key")]
     InvalidPeerId,
+    /// A file name in the share is not safe to write to disk.
+    #[error("unsafe file name {name:?}: {reason}")]
+    UnsafeName {
+        /// The name the sender chose.
+        name: String,
+        /// Why it was rejected.
+        #[source]
+        reason: NameError,
+    },
+    /// Exporting would overwrite a file that already exists.
+    #[error("{} already exists", .0.display())]
+    AlreadyExists(PathBuf),
 }
 
 impl Error {

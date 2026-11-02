@@ -239,3 +239,107 @@ async fn disallowed_peer_is_refused_again() {
     a.node.shutdown().await.unwrap();
     b.node.shutdown().await.unwrap();
 }
+
+/// Stores a share holding one entry with the given (possibly hostile) name.
+async fn share_with_name(node: &Node, name: &str, bytes: &'static [u8]) -> ContentHash {
+    let file = node
+        .store
+        .blobs()
+        .add_bytes(bytes)
+        .temp_tag()
+        .await
+        .unwrap();
+    let root = Collection::from_iter([(name.to_owned(), file.hash())])
+        .store(&node.store)
+        .await
+        .unwrap();
+    node.store
+        .tags()
+        .create(root.hash_and_format())
+        .await
+        .unwrap();
+    root.hash().into()
+}
+
+/// A fetched share, exported on the receiving side.
+async fn fetched(content: &[u8], name: &str) -> (TestNode, TestNode, ContentHash) {
+    let lookup = MemoryLookup::new();
+    let (a, b) = (offline_node(&lookup).await, offline_node(&lookup).await);
+    let (_src, path) = write_file(name, content);
+    let root = a.node.share_file(&path).await.unwrap();
+    a.node.allow(b.node.peer_id());
+    b.node.fetch(a.node.peer_id(), root).await.unwrap();
+    (a, b, root)
+}
+
+#[tokio::test]
+async fn export_writes_the_file() {
+    let content: Vec<u8> = (0..3 << 20).map(|i: u32| (i % 251) as u8).collect();
+    let (a, b, root) = fetched(&content, "big.bin").await;
+    let out = TempDir::new().unwrap();
+
+    let written = b.node.export(root, out.path()).await.unwrap();
+
+    assert_eq!(written, vec![out.path().join("big.bin")]);
+    assert_eq!(std::fs::read(&written[0]).unwrap(), content);
+    a.node.shutdown().await.unwrap();
+    b.node.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn export_refuses_to_overwrite() {
+    let (a, b, root) = fetched(b"new", "f.txt").await;
+    let out = TempDir::new().unwrap();
+    std::fs::write(out.path().join("f.txt"), b"old").unwrap();
+
+    let result = b.node.export(root, out.path()).await;
+
+    assert!(
+        matches!(result, Err(Error::AlreadyExists(_))),
+        "got {result:?}"
+    );
+    assert_eq!(std::fs::read(out.path().join("f.txt")).unwrap(), b"old");
+    a.node.shutdown().await.unwrap();
+    b.node.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn export_of_an_unknown_share_fails() {
+    let b = offline_node(&MemoryLookup::new()).await;
+    let out = TempDir::new().unwrap();
+
+    let result = b.node.export(ContentHash::from([9; 32]), out.path()).await;
+
+    assert!(matches!(result, Err(Error::Store(_))), "got {result:?}");
+    b.node.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn export_into_a_missing_folder_fails() {
+    let (a, b, root) = fetched(b"x", "f.txt").await;
+
+    let result = b.node.export(root, &b._dir.path().join("nope")).await;
+
+    assert!(matches!(result, Err(Error::Io(_))), "got {result:?}");
+    a.node.shutdown().await.unwrap();
+    b.node.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn export_rejects_a_hostile_name_and_writes_nothing() {
+    let node = offline_node(&MemoryLookup::new()).await;
+    let root = share_with_name(&node.node, "../evil", b"x").await;
+    let out = TempDir::new().unwrap();
+    let inner = out.path().join("inner");
+    std::fs::create_dir(&inner).unwrap();
+
+    let result = node.node.export(root, &inner).await;
+
+    assert!(
+        matches!(&result, Err(Error::UnsafeName { name, .. }) if name == "../evil"),
+        "got {result:?}"
+    );
+    assert!(!out.path().join("evil").exists());
+    assert_eq!(std::fs::read_dir(&inner).unwrap().count(), 0);
+    node.node.shutdown().await.unwrap();
+}

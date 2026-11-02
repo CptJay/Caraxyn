@@ -31,6 +31,7 @@ use tracing::info;
 use crate::{
     error::Error,
     ids::{ContentHash, PeerId},
+    safe_name,
 };
 
 impl From<EndpointId> for PeerId {
@@ -235,6 +236,58 @@ impl Node {
             .await
             .map_err(Error::store)?;
         Ok(root.hash().into())
+    }
+
+    /// Writes a share held in our store into the existing folder `dest`.
+    ///
+    /// Every name is checked and nothing is overwritten before the first file
+    /// is written, so a bad share leaves `dest` untouched. Returns the paths
+    /// written.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::UnsafeName`] if the sender chose a name that is not safe,
+    /// [`Error::AlreadyExists`] if a file with that name is already in `dest`,
+    /// [`Error::Io`] if `dest` is not a folder, [`Error::Store`] if the share
+    /// is not (fully) in the store.
+    pub async fn export(&self, root: ContentHash, dest: &Path) -> Result<Vec<PathBuf>, Error> {
+        if !tokio::fs::metadata(dest).await?.is_dir() {
+            return Err(std::io::Error::from(std::io::ErrorKind::NotADirectory).into());
+        }
+        let collection = Collection::load(root.into(), &self.store)
+            .await
+            .map_err(Error::store)?;
+
+        let mut targets = Vec::new();
+        for (name, hash) in collection.iter() {
+            let unsafe_name = |reason| Error::UnsafeName {
+                name: name.clone(),
+                reason,
+            };
+            safe_name::check(name).map_err(unsafe_name)?;
+            // shortcut: exact-match only, so names differing in case clash on case-insensitive filesystems; upgrade when that bites.
+            if targets.iter().any(|(n, _)| n == name) {
+                return Err(unsafe_name(safe_name::NameError::Duplicate));
+            }
+            let path = dest.join(name);
+            // shortcut: check-then-write is racy; fine for a single-user desktop app.
+            if tokio::fs::try_exists(&path).await? {
+                return Err(Error::AlreadyExists(path));
+            }
+            targets.push((name.clone(), (*hash, path)));
+        }
+
+        let mut written = Vec::new();
+        for (_, (hash, path)) in targets {
+            self.store
+                .blobs()
+                .export(hash, &path)
+                .await
+                .map_err(Error::store)?;
+            written.push(path);
+        }
+        info!(share = %root.short(), files = written.len(), "share exported");
+        Ok(written)
     }
 
     /// Stops the node: closes connections and the blob store.

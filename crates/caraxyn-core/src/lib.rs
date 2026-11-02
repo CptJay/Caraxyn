@@ -3,6 +3,7 @@
 pub mod error;
 pub mod ids;
 pub mod node;
+pub mod safe_name;
 
 /// Name of this crate, as Cargo knows it.
 pub fn crate_name() -> &'static str {
