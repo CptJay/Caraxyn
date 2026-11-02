@@ -1,6 +1,5 @@
 //! Crate-wide error type.
 
-use iroh::endpoint::BindError;
 use std::path::PathBuf;
 
 use thiserror::Error;
@@ -15,8 +14,9 @@ use crate::safe_name::NameError;
 #[non_exhaustive]
 pub enum Error {
     /// The network endpoint could not be started.
-    #[error("failed to start the network endpoint")]
-    Bind(#[from] BindError),
+    // shortcut: message only, like Store; keeps iroh out of the public API.
+    #[error("failed to start the network endpoint: {0}")]
+    Bind(String),
     /// The blob store failed to open, import or write.
     // shortcut: message only, the source chain is lost; split into variants when callers need to match.
     #[error("blob store error: {0}")]
