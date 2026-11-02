@@ -80,7 +80,7 @@ async fn shared_file_is_a_one_entry_collection() {
     let a = offline_node(&MemoryLookup::new()).await;
     let (_src, path) = write_file("hello.txt", b"hello world");
 
-    let root = a.node.share_file(&path).await.unwrap();
+    let root = a.node.share_file(&path, &[]).await.unwrap();
 
     assert_eq!(
         read_share(&a.node, root).await,
@@ -94,8 +94,8 @@ async fn same_file_shared_twice_gives_same_hash() {
     let a = offline_node(&MemoryLookup::new()).await;
     let (_src, path) = write_file("a.bin", b"same bytes");
 
-    let first = a.node.share_file(&path).await.unwrap();
-    let second = a.node.share_file(&path).await.unwrap();
+    let first = a.node.share_file(&path, &[]).await.unwrap();
+    let second = a.node.share_file(&path, &[]).await.unwrap();
 
     assert_eq!(first, second);
     a.node.shutdown().await.unwrap();
@@ -106,7 +106,7 @@ async fn zero_byte_file_can_be_shared() {
     let a = offline_node(&MemoryLookup::new()).await;
     let (_src, path) = write_file("empty", b"");
 
-    let root = a.node.share_file(&path).await.unwrap();
+    let root = a.node.share_file(&path, &[]).await.unwrap();
 
     assert_eq!(
         read_share(&a.node, root).await,
@@ -119,7 +119,7 @@ async fn zero_byte_file_can_be_shared() {
 async fn missing_file_is_an_error() {
     let a = offline_node(&MemoryLookup::new()).await;
 
-    let result = a.node.share_file(&a._dir.path().join("nope")).await;
+    let result = a.node.share_file(&a._dir.path().join("nope"), &[]).await;
 
     assert!(matches!(result, Err(Error::Io { .. })));
     a.node.shutdown().await.unwrap();
@@ -131,7 +131,7 @@ async fn missing_file_is_an_error() {
 async fn editing_a_large_shared_file_breaks_it() {
     let a = offline_node(&MemoryLookup::new()).await;
     let (_src, path) = write_file("f.txt", &vec![1u8; 1 << 20]);
-    let root = a.node.share_file(&path).await.unwrap();
+    let root = a.node.share_file(&path, &[]).await.unwrap();
 
     std::fs::write(&path, vec![2u8; 1 << 20]).unwrap();
 
@@ -146,7 +146,7 @@ async fn fetch_copies_a_small_file() {
     let lookup = MemoryLookup::new();
     let (a, b) = (offline_node(&lookup).await, offline_node(&lookup).await);
     let (_src, path) = write_file("hello.txt", b"hello world");
-    let root = a.node.share_file(&path).await.unwrap();
+    let root = a.node.share_file(&path, &[b.node.peer_id()]).await.unwrap();
 
     a.node.allow(b.node.peer_id()).unwrap();
     b.node.fetch(a.node.peer_id(), root).await.unwrap();
@@ -166,7 +166,7 @@ async fn fetch_streams_a_large_file() {
     // Not a repeating byte, so a corrupted or reordered chunk would show.
     let content: Vec<u8> = (0..3 << 20).map(|i: u32| (i % 251) as u8).collect();
     let (_src, path) = write_file("big.bin", &content);
-    let root = a.node.share_file(&path).await.unwrap();
+    let root = a.node.share_file(&path, &[b.node.peer_id()]).await.unwrap();
 
     a.node.allow(b.node.peer_id()).unwrap();
     b.node.fetch(a.node.peer_id(), root).await.unwrap();
@@ -201,7 +201,7 @@ async fn fetching_from_a_stopped_node_fails() {
     let lookup = MemoryLookup::new();
     let (a, b) = (offline_node(&lookup).await, offline_node(&lookup).await);
     let (_src, path) = write_file("hello.txt", b"hello world");
-    let root = a.node.share_file(&path).await.unwrap();
+    let root = a.node.share_file(&path, &[b.node.peer_id()]).await.unwrap();
     let a_id = a.node.peer_id();
     a.node.shutdown().await.unwrap();
 
@@ -216,7 +216,7 @@ async fn a_stranger_is_refused_until_allowed() {
     let lookup = MemoryLookup::new();
     let (a, b) = (offline_node(&lookup).await, offline_node(&lookup).await);
     let (_src, path) = write_file("hello.txt", b"hello world");
-    let root = a.node.share_file(&path).await.unwrap();
+    let root = a.node.share_file(&path, &[b.node.peer_id()]).await.unwrap();
 
     let refused = tokio::time::timeout(
         Duration::from_secs(20),
@@ -239,7 +239,7 @@ async fn disallowed_peer_is_refused_again() {
     let lookup = MemoryLookup::new();
     let (a, b) = (offline_node(&lookup).await, offline_node(&lookup).await);
     let (_src, path) = write_file("hello.txt", b"hello world");
-    let root = a.node.share_file(&path).await.unwrap();
+    let root = a.node.share_file(&path, &[b.node.peer_id()]).await.unwrap();
     a.node.allow(b.node.peer_id()).unwrap();
     a.node.disallow(b.node.peer_id()).unwrap();
 
@@ -280,7 +280,7 @@ async fn fetched(content: &[u8], name: &str) -> (TestNode, TestNode, ContentHash
     let lookup = MemoryLookup::new();
     let (a, b) = (offline_node(&lookup).await, offline_node(&lookup).await);
     let (_src, path) = write_file(name, content);
-    let root = a.node.share_file(&path).await.unwrap();
+    let root = a.node.share_file(&path, &[b.node.peer_id()]).await.unwrap();
     a.node.allow(b.node.peer_id()).unwrap();
     b.node.fetch(a.node.peer_id(), root).await.unwrap();
     (a, b, root)
@@ -377,7 +377,7 @@ async fn a_folder_round_trips() {
     let src = photo_tree();
     let root = a
         .node
-        .share_folder(&src.path().join("photos"))
+        .share_folder(&src.path().join("photos"), &[b.node.peer_id()])
         .await
         .unwrap();
     a.node.allow(b.node.peer_id()).unwrap();
@@ -412,8 +412,16 @@ async fn same_folder_gives_same_hash_whatever_the_creation_order() {
     };
     let (one, two) = (make(["x", "y", "z"]), make(["z", "y", "x"]));
 
-    let h1 = a.node.share_folder(&one.path().join("d")).await.unwrap();
-    let h2 = a.node.share_folder(&two.path().join("d")).await.unwrap();
+    let h1 = a
+        .node
+        .share_folder(&one.path().join("d"), &[])
+        .await
+        .unwrap();
+    let h2 = a
+        .node
+        .share_folder(&two.path().join("d"), &[])
+        .await
+        .unwrap();
 
     assert_eq!(h1, h2);
     a.node.shutdown().await.unwrap();
@@ -432,7 +440,7 @@ async fn symlinks_are_not_shared() {
     std::os::unix::fs::symlink(&secret, d.join("link.txt")).unwrap();
     std::os::unix::fs::symlink(dir.path(), d.join("loop")).unwrap();
 
-    let root = a.node.share_folder(&d).await.unwrap();
+    let root = a.node.share_folder(&d, &[]).await.unwrap();
 
     let names: Vec<_> = read_share(&a.node, root)
         .await
@@ -451,7 +459,7 @@ async fn an_empty_folder_shares_nothing() {
 
     let root = a
         .node
-        .share_folder(&dir.path().join("empty"))
+        .share_folder(&dir.path().join("empty"), &[])
         .await
         .unwrap();
     let out = TempDir::new().unwrap();
@@ -485,7 +493,7 @@ async fn export_refuses_an_existing_top_level_folder() {
     let src = photo_tree();
     let root = a
         .node
-        .share_folder(&src.path().join("photos"))
+        .share_folder(&src.path().join("photos"), &[])
         .await
         .unwrap();
     let out = TempDir::new().unwrap();
@@ -546,7 +554,7 @@ async fn export_accepts_a_relative_folder() {
     let src = photo_tree();
     let root = a
         .node
-        .share_folder(&src.path().join("photos"))
+        .share_folder(&src.path().join("photos"), &[])
         .await
         .unwrap();
     // A relative path to a temp dir, without changing the process-wide current dir.
@@ -600,7 +608,7 @@ async fn sharing_a_name_a_receiver_cannot_save_fails() {
     std::fs::write(d.join("ok.txt"), b"ok").unwrap();
     std::fs::write(d.join("notes."), b"x").unwrap();
 
-    let result = a.node.share_folder(&d).await;
+    let result = a.node.share_folder(&d, &[]).await;
 
     assert!(
         matches!(&result, Err(Error::UnsafeName { name, .. }) if name == "d/notes."),
@@ -614,7 +622,7 @@ async fn io_errors_name_the_path() {
     let a = offline_node(&MemoryLookup::new()).await;
     let missing = a._dir.path().join("nope");
 
-    let result = a.node.share_file(&missing).await;
+    let result = a.node.share_file(&missing, &[]).await;
 
     assert!(
         matches!(&result, Err(Error::Io { path, .. }) if *path == missing),
@@ -711,7 +719,7 @@ async fn a_received_share_is_kept_until_exported_then_freed() {
     let b = node_with_gc(&lookup, FAST_GC).await;
     let content = vec![5u8; 3 << 20];
     let (_src, path) = write_file("big.bin", &content);
-    let root = a.node.share_file(&path).await.unwrap();
+    let root = a.node.share_file(&path, &[b.node.peer_id()]).await.unwrap();
     a.node.allow(b.node.peer_id()).unwrap();
     b.node.fetch(a.node.peer_id(), root).await.unwrap();
     let store_dir = b._dir.path().join("blobs");
@@ -743,7 +751,7 @@ async fn garbage_collection_keeps_our_shares_and_never_touches_shared_files() {
     let big: Vec<u8> = (0..3 << 20).map(|i: u32| (i % 251) as u8).collect();
     std::fs::write(d.join("big.bin"), &big).unwrap();
     std::fs::write(d.join("small.txt"), b"small").unwrap();
-    let root = a.node.share_folder(&d).await.unwrap();
+    let root = a.node.share_folder(&d, &[b.node.peer_id()]).await.unwrap();
 
     tokio::time::sleep(FAST_GC * 6).await;
 
@@ -766,8 +774,8 @@ async fn sharing_the_same_file_twice_leaves_one_tag() {
     let a = offline_node(&MemoryLookup::new()).await;
     let (_src, path) = write_file("a.txt", b"same");
 
-    a.node.share_file(&path).await.unwrap();
-    a.node.share_file(&path).await.unwrap();
+    a.node.share_file(&path, &[]).await.unwrap();
+    a.node.share_file(&path, &[]).await.unwrap();
 
     assert_eq!(a.node.store.tags().delete_all().await.unwrap(), 1);
     a.node.shutdown().await.unwrap();
@@ -789,7 +797,7 @@ async fn an_unexported_share_survives_a_restart_and_collection() {
     let b = start().await.unwrap();
     lookup.add_endpoint_info(b.router.endpoint().addr());
     let (_src, path) = write_file("big.bin", &vec![6u8; 1 << 20]);
-    let root = a.node.share_file(&path).await.unwrap();
+    let root = a.node.share_file(&path, &[b.peer_id()]).await.unwrap();
     a.node.allow(b.peer_id()).unwrap();
     b.fetch(a.node.peer_id(), root).await.unwrap();
     b.shutdown().await.unwrap();
@@ -830,7 +838,10 @@ async fn the_allow_list_survives_a_restart() {
     let (b, c) = (offline_node(&lookup).await, offline_node(&lookup).await);
     let a = node_in(dir.path(), &lookup).await;
     let (_src, path) = write_file("hello.txt", b"hello");
-    let root = a.share_file(&path).await.unwrap();
+    let root = a
+        .share_file(&path, &[b.node.peer_id(), c.node.peer_id()])
+        .await
+        .unwrap();
     a.allow(b.node.peer_id()).unwrap();
     a.allow(c.node.peer_id()).unwrap();
     a.disallow(c.node.peer_id()).unwrap();
@@ -852,7 +863,7 @@ async fn a_fetch_that_gets_nothing_leaves_no_tag() {
     let lookup = MemoryLookup::new();
     let (a, b) = (offline_node(&lookup).await, offline_node(&lookup).await);
     let (_src, path) = write_file("x.txt", b"x");
-    let root = a.node.share_file(&path).await.unwrap();
+    let root = a.node.share_file(&path, &[b.node.peer_id()]).await.unwrap();
 
     // Not allowed: the sender refuses, so nothing arrives.
     let refused = tokio::time::timeout(
@@ -896,7 +907,7 @@ async fn a_stranger_gets_a_control_answer_but_no_blobs() {
     let lookup = MemoryLookup::new();
     let (a, b) = (offline_node(&lookup).await, offline_node(&lookup).await);
     let (_src, path) = write_file("hello.txt", b"hello");
-    let root = a.node.share_file(&path).await.unwrap();
+    let root = a.node.share_file(&path, &[b.node.peer_id()]).await.unwrap();
     let request = control::ControlMsg::ContactRequest {
         token: crate::contacts::InviteToken::random(),
         name: "B".into(),
@@ -978,8 +989,8 @@ async fn an_invite_makes_two_devices_mutual_contacts() {
     let (_sa, pa) = write_file("from-a.txt", b"a");
     let (_sb, pb) = write_file("from-b.txt", b"b");
     let (root_a, root_b) = (
-        a.node.share_file(&pa).await.unwrap(),
-        b.node.share_file(&pb).await.unwrap(),
+        a.node.share_file(&pa, &[b.node.peer_id()]).await.unwrap(),
+        b.node.share_file(&pb, &[a.node.peer_id()]).await.unwrap(),
     );
 
     let code = a.node.create_invite("Alice").unwrap();
@@ -1011,7 +1022,11 @@ async fn an_invite_works_only_once() {
         offline_node(&lookup).await,
     );
     let (_src, path) = write_file("x.txt", b"x");
-    let root = a.node.share_file(&path).await.unwrap();
+    let root = a
+        .node
+        .share_file(&path, &[b.node.peer_id(), c.node.peer_id()])
+        .await
+        .unwrap();
     let code = a.node.create_invite("Alice").unwrap();
     b.node.redeem_invite(&code, "Bob").await.unwrap();
 
@@ -1081,7 +1096,7 @@ async fn contacts_survive_a_restart_and_removal_refuses_them() {
     let a = node_in(dir.path(), &lookup).await;
     let b = offline_node(&lookup).await;
     let (_src, path) = write_file("x.txt", b"x");
-    let root = a.share_file(&path).await.unwrap();
+    let root = a.share_file(&path, &[b.node.peer_id()]).await.unwrap();
     let code = a.create_invite("Alice").unwrap();
     b.node.redeem_invite(&code, "Bob").await.unwrap();
     a.shutdown().await.unwrap();
@@ -1094,7 +1109,7 @@ async fn contacts_survive_a_restart_and_removal_refuses_them() {
 
     assert!(a.contacts().unwrap().is_empty());
     let (_src2, path2) = write_file("y.txt", b"y");
-    let root2 = a.share_file(&path2).await.unwrap();
+    let root2 = a.share_file(&path2, &[b.node.peer_id()]).await.unwrap();
     assert!(!can_fetch(&b.node, &a, root2).await);
     a.shutdown().await.unwrap();
     b.node.shutdown().await.unwrap();
