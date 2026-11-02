@@ -148,7 +148,7 @@ async fn fetch_copies_a_small_file() {
     let (_src, path) = write_file("hello.txt", b"hello world");
     let root = a.node.share_file(&path).await.unwrap();
 
-    a.node.allow(b.node.peer_id());
+    a.node.allow(b.node.peer_id()).unwrap();
     b.node.fetch(a.node.peer_id(), root).await.unwrap();
 
     assert_eq!(
@@ -168,7 +168,7 @@ async fn fetch_streams_a_large_file() {
     let (_src, path) = write_file("big.bin", &content);
     let root = a.node.share_file(&path).await.unwrap();
 
-    a.node.allow(b.node.peer_id());
+    a.node.allow(b.node.peer_id()).unwrap();
     b.node.fetch(a.node.peer_id(), root).await.unwrap();
 
     assert_eq!(
@@ -183,7 +183,7 @@ async fn fetch_streams_a_large_file() {
 async fn fetching_an_unknown_hash_fails() {
     let lookup = MemoryLookup::new();
     let (a, b) = (offline_node(&lookup).await, offline_node(&lookup).await);
-    a.node.allow(b.node.peer_id());
+    a.node.allow(b.node.peer_id()).unwrap();
 
     let result = tokio::time::timeout(
         Duration::from_secs(20),
@@ -227,7 +227,7 @@ async fn a_stranger_is_refused_until_allowed() {
     assert!(matches!(refused, Ok(Err(_))), "got {refused:?}");
     assert!(Collection::load(root.into(), &b.node.store).await.is_err());
 
-    a.node.allow(b.node.peer_id());
+    a.node.allow(b.node.peer_id()).unwrap();
     b.node.fetch(a.node.peer_id(), root).await.unwrap();
     assert_eq!(read_share(&b.node, root).await.len(), 1);
     a.node.shutdown().await.unwrap();
@@ -240,8 +240,8 @@ async fn disallowed_peer_is_refused_again() {
     let (a, b) = (offline_node(&lookup).await, offline_node(&lookup).await);
     let (_src, path) = write_file("hello.txt", b"hello world");
     let root = a.node.share_file(&path).await.unwrap();
-    a.node.allow(b.node.peer_id());
-    a.node.disallow(b.node.peer_id());
+    a.node.allow(b.node.peer_id()).unwrap();
+    a.node.disallow(b.node.peer_id()).unwrap();
 
     let result = tokio::time::timeout(
         Duration::from_secs(20),
@@ -281,7 +281,7 @@ async fn fetched(content: &[u8], name: &str) -> (TestNode, TestNode, ContentHash
     let (a, b) = (offline_node(&lookup).await, offline_node(&lookup).await);
     let (_src, path) = write_file(name, content);
     let root = a.node.share_file(&path).await.unwrap();
-    a.node.allow(b.node.peer_id());
+    a.node.allow(b.node.peer_id()).unwrap();
     b.node.fetch(a.node.peer_id(), root).await.unwrap();
     (a, b, root)
 }
@@ -380,7 +380,7 @@ async fn a_folder_round_trips() {
         .share_folder(&src.path().join("photos"))
         .await
         .unwrap();
-    a.node.allow(b.node.peer_id());
+    a.node.allow(b.node.peer_id()).unwrap();
     b.node.fetch(a.node.peer_id(), root).await.unwrap();
     let out = TempDir::new().unwrap();
 
@@ -712,7 +712,7 @@ async fn a_received_share_is_kept_until_exported_then_freed() {
     let content = vec![5u8; 3 << 20];
     let (_src, path) = write_file("big.bin", &content);
     let root = a.node.share_file(&path).await.unwrap();
-    a.node.allow(b.node.peer_id());
+    a.node.allow(b.node.peer_id()).unwrap();
     b.node.fetch(a.node.peer_id(), root).await.unwrap();
     let store_dir = b._dir.path().join("blobs");
     let fetched = disk_usage(&store_dir);
@@ -748,7 +748,7 @@ async fn garbage_collection_keeps_our_shares_and_never_touches_shared_files() {
     tokio::time::sleep(FAST_GC * 6).await;
 
     assert_eq!(std::fs::read(d.join("big.bin")).unwrap(), big);
-    a.node.allow(b.node.peer_id());
+    a.node.allow(b.node.peer_id()).unwrap();
     b.node.fetch(a.node.peer_id(), root).await.unwrap();
     assert_eq!(
         read_share(&b.node, root).await,
@@ -790,7 +790,7 @@ async fn an_unexported_share_survives_a_restart_and_collection() {
     lookup.add_endpoint_info(b.router.endpoint().addr());
     let (_src, path) = write_file("big.bin", &vec![6u8; 1 << 20]);
     let root = a.node.share_file(&path).await.unwrap();
-    a.node.allow(b.peer_id());
+    a.node.allow(b.peer_id()).unwrap();
     b.fetch(a.node.peer_id(), root).await.unwrap();
     b.shutdown().await.unwrap();
     // The sender goes away: the share can only come from b's own store now.
@@ -807,4 +807,85 @@ async fn an_unexported_share_survives_a_restart_and_collection() {
         vec![6u8; 1 << 20]
     );
     b.shutdown().await.unwrap();
+}
+
+/// Starts a node on `dir` that the other test nodes can find through `lookup`.
+async fn node_in(dir: &Path, lookup: &MemoryLookup) -> Node {
+    let node = Node::spawn_with(
+        NodeConfig::new(dir),
+        presets::Minimal,
+        Some(lookup.clone()),
+        GC_INTERVAL,
+    )
+    .await
+    .unwrap();
+    lookup.add_endpoint_info(node.router.endpoint().addr());
+    node
+}
+
+#[tokio::test]
+async fn the_allow_list_survives_a_restart() {
+    let lookup = MemoryLookup::new();
+    let dir = TempDir::new().unwrap();
+    let (b, c) = (offline_node(&lookup).await, offline_node(&lookup).await);
+    let a = node_in(dir.path(), &lookup).await;
+    let (_src, path) = write_file("hello.txt", b"hello");
+    let root = a.share_file(&path).await.unwrap();
+    a.allow(b.node.peer_id()).unwrap();
+    a.allow(c.node.peer_id()).unwrap();
+    a.disallow(c.node.peer_id()).unwrap();
+    a.shutdown().await.unwrap();
+
+    let a = node_in(dir.path(), &lookup).await;
+
+    b.node.fetch(a.peer_id(), root).await.unwrap();
+    let refused =
+        tokio::time::timeout(Duration::from_secs(20), c.node.fetch(a.peer_id(), root)).await;
+    assert!(matches!(refused, Ok(Err(_))), "got {refused:?}");
+    a.shutdown().await.unwrap();
+    b.node.shutdown().await.unwrap();
+    c.node.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn a_fetch_that_gets_nothing_leaves_no_tag() {
+    let lookup = MemoryLookup::new();
+    let (a, b) = (offline_node(&lookup).await, offline_node(&lookup).await);
+    let (_src, path) = write_file("x.txt", b"x");
+    let root = a.node.share_file(&path).await.unwrap();
+
+    // Not allowed: the sender refuses, so nothing arrives.
+    let refused = tokio::time::timeout(
+        Duration::from_secs(20),
+        b.node.fetch(a.node.peer_id(), root),
+    )
+    .await;
+
+    assert!(matches!(refused, Ok(Err(_))), "got {refused:?}");
+    assert_eq!(b.node.store.tags().delete_all().await.unwrap(), 0);
+    a.node.shutdown().await.unwrap();
+    b.node.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn a_partly_received_share_keeps_its_tag() {
+    let lookup = MemoryLookup::new();
+    let (a, b) = (offline_node(&lookup).await, offline_node(&lookup).await);
+    // The sender has the file list but not the file, so only the list arrives.
+    let root = Collection::from_iter([("x.txt".to_owned(), Hash::new(b"missing"))])
+        .store(&a.node.store)
+        .await
+        .unwrap();
+    a.node.allow(b.node.peer_id()).unwrap();
+
+    let result = tokio::time::timeout(
+        Duration::from_secs(20),
+        b.node.fetch(a.node.peer_id(), root.hash().into()),
+    )
+    .await;
+
+    assert!(matches!(result, Ok(Err(_))), "got {result:?}");
+    assert_eq!(b.node.store.tags().delete_all().await.unwrap(), 1);
+    a.node.shutdown().await.unwrap();
+    b.node.shutdown().await.unwrap();
 }

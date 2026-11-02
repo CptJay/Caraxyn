@@ -94,7 +94,9 @@ pub struct Node {
     router: Router,
     store: Store,
     /// Peers allowed to fetch from us; everyone else is refused on connect.
+    /// A copy of the database's list, so the check never reads the disk.
     allowed: Arc<RwLock<HashSet<PeerId>>>,
+    db: Arc<db::Db>,
 }
 
 impl Node {
@@ -107,8 +109,9 @@ impl Node {
     ///
     /// Returns [`Error::Bind`] if the network endpoint cannot be started,
     /// [`Error::Store`] if the blob store cannot be opened,
-    /// [`Error::InvalidKeyFile`] if the key file is damaged, or [`Error::Io`]
-    /// if it cannot be read or written.
+    /// [`Error::InvalidKeyFile`] if the key file is damaged, [`Error::Io`]
+    /// if it cannot be read or written, or [`Error::Database`] if the
+    /// database cannot be opened.
     pub async fn spawn(config: NodeConfig) -> Result<Self, Error> {
         Self::spawn_with(config, presets::N0, None, GC_INTERVAL).await
     }
@@ -135,6 +138,8 @@ impl Node {
             .into();
         // After the store: it locks `data_dir`, so two nodes never race to create the key.
         let key = key::load_or_create(&config.data_dir.join("secret.key"))?;
+        let db = db::Db::open(&config.data_dir.join("caraxyn.redb"))?;
+        let allowed = Arc::new(RwLock::new(db.allowed()?));
         let mut builder = Endpoint::builder(preset).secret_key(key);
         if let Some(lookup) = lookup {
             builder = builder.address_lookup(lookup);
@@ -143,7 +148,6 @@ impl Node {
             .bind()
             .await
             .map_err(|e| Error::Bind(e.to_string()))?;
-        let allowed = Arc::new(RwLock::new(HashSet::new()));
         let (events, mut requests) = EventSender::channel(
             16,
             EventMask {
@@ -177,6 +181,7 @@ impl Node {
             router,
             store,
             allowed,
+            db: Arc::new(db),
         };
         info!(peer = %node.peer_id().short(), "node started");
         Ok(node)
@@ -190,21 +195,36 @@ impl Node {
 
     /// Lets `peer` fetch from this node. Nobody is allowed by default.
     ///
-    /// The list lives in memory only. It is checked when a peer connects, so
-    /// every share on this node is open to every allowed peer.
-    pub fn allow(&self, peer: PeerId) {
-        self.allowed
-            .write()
-            .expect("allow-list lock poisoned")
-            .insert(peer);
+    /// The list is saved, so it survives restarts. It is checked when a peer
+    /// connects, so every share on this node is open to every allowed peer.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Database`] if the change cannot be saved; nothing changes then.
+    pub fn allow(&self, peer: PeerId) -> Result<(), Error> {
+        self.set_allowed(peer, true)
     }
 
     /// Stops `peer` from connecting again. A transfer already running is not cut.
-    pub fn disallow(&self, peer: PeerId) {
-        self.allowed
-            .write()
-            .expect("allow-list lock poisoned")
-            .remove(&peer);
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Database`] if the change cannot be saved; nothing changes then.
+    pub fn disallow(&self, peer: PeerId) -> Result<(), Error> {
+        self.set_allowed(peer, false)
+    }
+
+    fn set_allowed(&self, peer: PeerId, allowed: bool) -> Result<(), Error> {
+        // Lock held across the save, so two calls cannot leave memory and disk disagreeing.
+        let mut list = self.allowed.write().expect("allow-list lock poisoned");
+        // Disk first: if saving fails, memory still matches what is saved.
+        self.db.set_allowed(peer, allowed)?;
+        if allowed {
+            list.insert(peer);
+        } else {
+            list.remove(&peer);
+        }
+        Ok(())
     }
 
     /// Downloads a share from another node into our own store.
@@ -223,20 +243,36 @@ impl Node {
     pub async fn fetch(&self, from: PeerId, root: ContentHash) -> Result<(), Error> {
         let provider = EndpointId::from_bytes(from.as_ref()).map_err(|_| Error::InvalidPeerId)?;
         // Before the download, so garbage collection cannot delete half of it.
-        // Kept if the download fails, so a retry resumes with the verified chunks.
         self.store
             .tags()
             .set(recv_tag(root), HashAndFormat::hash_seq(root.into()))
             .await
             .map_err(Error::store)?;
-        self.store
+        let download = self
+            .store
             .downloader(self.router.endpoint())
             .download(
                 HashAndFormat::hash_seq(root.into()),
                 Shuffled::new(vec![provider]),
             )
-            .await
-            .map_err(Error::store)?;
+            .await;
+        if let Err(e) = download {
+            // The tag stays when the share's file list arrived, so a retry resumes.
+            // Without the list there is nothing to resume, and the tag would only
+            // make every garbage collection run log a warning. If the check itself
+            // fails, keep the tag: a leftover tag is harmless, lost data is not.
+            if !self
+                .store
+                .blobs()
+                .has(Hash::from(root))
+                .await
+                .unwrap_or(true)
+                && let Err(e) = self.store.tags().delete(recv_tag(root)).await
+            {
+                warn!(share = %root.short(), %e, "could not drop the tag of a failed fetch");
+            }
+            return Err(Error::store(e));
+        }
         info!(from = %from.short(), share = %root.short(), "share fetched");
         Ok(())
     }
@@ -479,6 +515,7 @@ fn file_name(path: &Path) -> Result<String, Error> {
         .ok_or(Error::InvalidPath)
 }
 
+mod db;
 mod key;
 
 #[cfg(test)]
