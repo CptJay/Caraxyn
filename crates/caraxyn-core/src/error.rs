@@ -23,6 +23,9 @@ pub enum Error {
     /// The path has no file name that can be shared (or it is not valid UTF-8).
     #[error("path has no usable UTF-8 file name")]
     InvalidPath,
+    /// The peer id is not a valid public key.
+    #[error("peer id is not a valid public key")]
+    InvalidPeerId,
 }
 
 impl Error {
