@@ -871,11 +871,12 @@ async fn a_fetch_that_gets_nothing_leaves_no_tag() {
 async fn a_partly_received_share_keeps_its_tag() {
     let lookup = MemoryLookup::new();
     let (a, b) = (offline_node(&lookup).await, offline_node(&lookup).await);
-    // The sender has the file list but not the file, so only the list arrives.
-    let root = Collection::from_iter([("x.txt".to_owned(), Hash::new(b"missing"))])
-        .store(&a.node.store)
-        .await
-        .unwrap();
+    // The sender has the file list but not the file, so the fetch fails on the file.
+    let list = Collection::from_iter([("x.txt".to_owned(), Hash::new(b"missing"))]);
+    let root = list.clone().store(&a.node.store).await.unwrap();
+    // The receiver already has the list, as after an interrupted download. Not left
+    // to the network: when the sender gives up, QUIC may drop the list unread.
+    let _list_on_b = list.store(&b.node.store).await.unwrap();
     a.node.allow(b.node.peer_id()).unwrap();
 
     let result = tokio::time::timeout(
