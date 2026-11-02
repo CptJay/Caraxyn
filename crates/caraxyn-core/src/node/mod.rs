@@ -4,7 +4,7 @@
 //! sees Caraxyn's own types.
 
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     path::{Path, PathBuf},
     sync::Arc,
     time::Duration,
@@ -24,7 +24,10 @@ use iroh_blobs::{
         downloader::Shuffled,
     },
     format::collection::Collection,
-    provider::events::{AbortReason, ConnectMode, EventMask, EventSender, ProviderMessage},
+    hashseq::HashSeq,
+    provider::events::{
+        AbortReason, ConnectMode, EventMask, EventSender, ObserveMode, ProviderMessage, RequestMode,
+    },
     store::{
         GcConfig,
         fs::{FsStore, options::Options},
@@ -150,28 +153,19 @@ impl Node {
             .bind()
             .await
             .map_err(|e| Error::Bind(e.to_string()))?;
-        let (events, mut requests) = EventSender::channel(
+        let (events, requests) = EventSender::channel(
             16,
             EventMask {
                 connected: ConnectMode::Intercept,
+                get: RequestMode::Intercept,
+                // Batch requests would bypass the per-hash check, so they are refused outright.
+                get_many: RequestMode::Disabled,
+                observe: ObserveMode::Intercept,
                 ..EventMask::DEFAULT
             },
         );
-        let gate = Arc::clone(&access);
         // Ends by itself when the router (and with it the sender) is dropped.
-        tokio::spawn(async move {
-            while let Some(msg) = requests.recv().await {
-                if let ProviderMessage::ClientConnected(m) = msg {
-                    let ok = m.endpoint_id.is_some_and(|id| gate.is_allowed(id.into()));
-                    let verdict = if ok {
-                        Ok(())
-                    } else {
-                        Err(AbortReason::Permission)
-                    };
-                    m.tx.send(verdict).await.ok();
-                }
-            }
-        });
+        tokio::spawn(run_blob_gate(Arc::clone(&access), requests));
         let router = Router::builder(endpoint)
             .accept(iroh_blobs::ALPN, BlobsProtocol::new(&store, Some(events)))
             .accept(
@@ -196,10 +190,11 @@ impl Node {
         self.router.endpoint().id().into()
     }
 
-    /// Lets `peer` fetch from this node. Nobody is allowed by default.
+    /// Lets `peer` connect to fetch from this node, like a contact. Nobody is
+    /// allowed by default.
     ///
-    /// The list is saved, so it survives restarts. It is checked when a peer
-    /// connects, so every share on this node is open to every allowed peer.
+    /// The list is saved, so it survives restarts. Connecting is not enough:
+    /// each share is only for its own recipients.
     ///
     /// # Errors
     ///
@@ -280,7 +275,8 @@ impl Node {
         self.access.db().contacts()
     }
 
-    /// Removes a contact; from then on they cannot fetch from this node.
+    /// Removes a contact and takes them off every share; from then on they
+    /// cannot fetch from this node, even if they become a contact again later.
     /// They are not told. A transfer already running is not cut.
     ///
     /// # Errors
@@ -361,7 +357,11 @@ impl Node {
         Ok(())
     }
 
-    /// Imports a file so it can be shared, and returns the hash of the share.
+    /// Imports a file and shares it with `recipients`; returns the share's hash.
+    ///
+    /// Only recipients may fetch it, and only if they may connect at all (a
+    /// contact, or [allowed](Self::allow)). Sharing the same content again adds
+    /// recipients to the ones it had.
     ///
     /// The file is referenced in place rather than copied: it must not be
     /// changed, moved or deleted while it is shared. The share is a collection
@@ -372,18 +372,23 @@ impl Node {
     /// [`Error::Io`] if the file does not exist, [`Error::InvalidPath`] if it
     /// has no usable name, [`Error::UnsafeName`] if a receiver could not save
     /// it under that name, [`Error::Store`] if the import fails.
-    pub async fn share_file(&self, path: &Path) -> Result<ContentHash, Error> {
+    pub async fn share_file(
+        &self,
+        path: &Path,
+        recipients: &[PeerId],
+    ) -> Result<ContentHash, Error> {
         // The store requires an absolute path; this also fails if the file is missing.
         let path = tokio::fs::canonicalize(path)
             .await
             .map_err(Error::io(path))?;
         let name = file_name(&path)?;
-        self.share_entries(vec![(name, path)]).await
+        self.share_entries(vec![(name, path)], recipients).await
     }
 
-    /// Imports a folder so it can be shared, and returns the hash of the share.
+    /// Imports a folder and shares it with `recipients`; returns the share's hash.
     ///
-    /// Like [`share_file`](Self::share_file), files are referenced in place.
+    /// Like [`share_file`](Self::share_file): only recipients may fetch it, and
+    /// files are referenced in place.
     /// The share has one entry per file, named by its path relative to the
     /// folder's parent (`photos/trip/a.jpg`), in sorted order so the same folder
     /// always gives the same hash. Symlinks are skipped, hidden files are
@@ -395,7 +400,11 @@ impl Node {
     /// [`Error::InvalidPath`] if a name is not UTF-8, [`Error::UnsafeName`] if
     /// a receiver could not save a name, [`Error::Store`] if an import fails.
     // shortcut: a collection only lists files, so empty folders are lost; needs a marker format to fix.
-    pub async fn share_folder(&self, path: &Path) -> Result<ContentHash, Error> {
+    pub async fn share_folder(
+        &self,
+        path: &Path,
+        recipients: &[PeerId],
+    ) -> Result<ContentHash, Error> {
         let root = tokio::fs::canonicalize(path)
             .await
             .map_err(Error::io(path))?;
@@ -416,11 +425,16 @@ impl Node {
             }
         }
         entries.sort();
-        self.share_entries(entries).await
+        self.share_entries(entries, recipients).await
     }
 
-    /// Imports each `(name, path)` and stores them as one tagged collection.
-    async fn share_entries(&self, entries: Vec<(String, PathBuf)>) -> Result<ContentHash, Error> {
+    /// Imports each `(name, path)`, stores them as one tagged collection and
+    /// saves it as a share for `recipients`.
+    async fn share_entries(
+        &self,
+        entries: Vec<(String, PathBuf)>,
+        recipients: &[PeerId],
+    ) -> Result<ContentHash, Error> {
         // Refuse here what the receiver's export would refuse, before importing anything.
         for (name, _) in &entries {
             check_name(name)?;
@@ -454,6 +468,17 @@ impl Node {
             .set(share_tag(root_hash), root.hash_and_format())
             .await
             .map_err(Error::store)?;
+        // Every hash a recipient may ask for: the root's list (names, then files) and the root.
+        let list = self
+            .store
+            .blobs()
+            .get_bytes(root.hash())
+            .await
+            .map_err(Error::store)?;
+        let list = HashSeq::try_from(list).map_err(Error::store)?;
+        let mut hashes: Vec<ContentHash> = list.iter().map(ContentHash::from).collect();
+        hashes.push(root_hash);
+        self.access.add_share(root_hash, recipients, hashes)?;
         Ok(root_hash)
     }
 
@@ -589,6 +614,58 @@ fn check_name(name: &str) -> Result<(), Error> {
         })?;
     }
     Ok(())
+}
+
+/// Answers iroh-blobs' questions about each connection and request: only allowed
+/// peers may connect, and each request must be for a share they are a recipient of.
+async fn run_blob_gate(
+    access: Arc<access::Access>,
+    mut requests: tokio::sync::mpsc::Receiver<ProviderMessage>,
+) {
+    let verdict = |ok: bool| {
+        if ok {
+            Ok(())
+        } else {
+            Err(AbortReason::Permission)
+        }
+    };
+    // Which peer each open connection belongs to, learned when it connects.
+    let mut peers: HashMap<u64, PeerId> = HashMap::new();
+    while let Some(msg) = requests.recv().await {
+        match msg {
+            ProviderMessage::ClientConnected(m) => {
+                let peer = m
+                    .endpoint_id
+                    .map(PeerId::from)
+                    .filter(|peer| access.is_allowed(*peer));
+                if let Some(peer) = peer {
+                    peers.insert(m.connection_id, peer);
+                }
+                m.tx.send(verdict(peer.is_some())).await.ok();
+            }
+            ProviderMessage::ConnectionClosed(m) => {
+                peers.remove(&m.connection_id);
+            }
+            // Allowed checked again per request: a peer removed while its connection
+            // stays open must not get anything new on it.
+            ProviderMessage::GetRequestReceived(m) => {
+                let as_list = !m.request.ranges.is_blob();
+                let ok = peers.get(&m.connection_id).is_some_and(|peer| {
+                    access.is_allowed(*peer)
+                        && access.may_get(*peer, m.request.hash.into(), as_list)
+                });
+                m.tx.send(verdict(ok)).await.ok();
+            }
+            // "Do you have this?" reveals what is in the store, so the same rule applies.
+            ProviderMessage::ObserveRequestReceived(m) => {
+                let ok = peers.get(&m.connection_id).is_some_and(|peer| {
+                    access.is_allowed(*peer) && access.may_get(*peer, m.request.hash.into(), false)
+                });
+                m.tx.send(verdict(ok)).await.ok();
+            }
+            _ => {}
+        }
+    }
 }
 
 /// The last path component as UTF-8.

@@ -1,28 +1,95 @@
-//! Who may fetch from this node: the saved allow-list and contacts, plus an
-//! in-memory copy of the allow-list so the connection check never reads the disk.
+//! Who may fetch what from this node: the saved allow-list, contacts and
+//! shares, plus in-memory copies so the checks never read the disk.
 
-use std::{collections::HashSet, sync::RwLock};
+use std::{
+    collections::{HashMap, HashSet},
+    sync::RwLock,
+};
 
-use super::db::Db;
+use super::db::{Db, Share};
 use crate::{
     contacts::{Contact, InviteToken},
     error::Error,
-    ids::PeerId,
+    ids::{ContentHash, PeerId},
 };
 
-/// Shared by the node and its control handler.
+/// Shared by the node, its blob gate and its control handler.
 #[derive(Debug)]
 pub(super) struct Access {
+    /// Peers that may connect at all.
     allowed: RwLock<HashSet<PeerId>>,
+    shares: RwLock<Shares>,
     db: Db,
+}
+
+/// Our shares, indexed for the per-request check.
+#[derive(Debug, Default)]
+struct Shares {
+    /// Share root → who may fetch it.
+    recipients: HashMap<ContentHash, HashSet<PeerId>>,
+    /// Any hash in a share (root, name list, file) → the shares containing it.
+    containing: HashMap<ContentHash, HashSet<ContentHash>>,
+}
+
+impl Shares {
+    fn add(&mut self, root: ContentHash, share: Share) {
+        for hash in share.hashes {
+            self.containing.entry(hash).or_default().insert(root);
+        }
+        self.recipients
+            .entry(root)
+            .or_default()
+            .extend(share.recipients);
+    }
 }
 
 impl Access {
     pub(super) fn new(db: Db) -> Result<Self, Error> {
+        let mut shares = Shares::default();
+        for (root, share) in db.shares()? {
+            shares.add(root, share);
+        }
         Ok(Self {
             allowed: RwLock::new(db.allowed()?),
+            shares: RwLock::new(shares),
             db,
         })
+    }
+
+    /// Whether `peer` may get `hash`. `as_list` means the request reads it as
+    /// a list of further hashes; that is only allowed on a share's root, since
+    /// a file's bytes could otherwise spell out hashes of other content.
+    pub(super) fn may_get(&self, peer: PeerId, hash: ContentHash, as_list: bool) -> bool {
+        let shares = self.shares.read().expect("share lock poisoned");
+        let is_recipient = |root: &ContentHash| {
+            shares
+                .recipients
+                .get(root)
+                .is_some_and(|peers| peers.contains(&peer))
+        };
+        if as_list {
+            is_recipient(&hash)
+        } else {
+            shares
+                .containing
+                .get(&hash)
+                .is_some_and(|roots| roots.iter().any(is_recipient))
+        }
+    }
+
+    /// Saves a share for `recipients` (added to any it had), then indexes it.
+    pub(super) fn add_share(
+        &self,
+        root: ContentHash,
+        recipients: &[PeerId],
+        hashes: Vec<ContentHash>,
+    ) -> Result<(), Error> {
+        // Lock held across the save, so two calls cannot leave memory and disk disagreeing.
+        let mut shares = self.shares.write().expect("share lock poisoned");
+        // Disk first: if saving fails, memory still matches what is saved.
+        let share = self.db.add_share(root, recipients, hashes)?;
+        shares.add(root, share);
+        Ok(())
     }
 
     pub(super) fn db(&self) -> &Db {
@@ -52,8 +119,16 @@ impl Access {
     }
 
     pub(super) fn remove_contact(&self, peer: PeerId) -> Result<(), Error> {
-        self.change(peer, false, |db| db.remove_contact(peer).map(|()| true))
-            .map(drop)
+        // Both locks held across the save (always this order), so neither copy can
+        // disagree with the disk.
+        let mut allowed = self.allowed.write().expect("allow-list lock poisoned");
+        let mut shares = self.shares.write().expect("share lock poisoned");
+        self.db.remove_contact(peer)?;
+        allowed.remove(&peer);
+        for recipients in shares.recipients.values_mut() {
+            recipients.remove(&peer);
+        }
+        Ok(())
     }
 
     /// Adds `contact` if `token` is valid at `now`; returns whether it was.

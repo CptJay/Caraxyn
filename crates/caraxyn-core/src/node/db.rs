@@ -7,8 +7,10 @@ use redb::{Database, ReadableDatabase, ReadableTable, TableDefinition, WriteTran
 use crate::{
     contacts::{Contact, InviteToken, check_invite},
     error::Error,
-    ids::PeerId,
+    ids::{ContentHash, PeerId},
 };
+
+use serde::{Deserialize, Serialize};
 
 /// Peers allowed to fetch from us. Key: the peer's id; no value yet.
 const ALLOWED: TableDefinition<&[u8; 32], ()> = TableDefinition::new("allowed_peers");
@@ -18,6 +20,18 @@ const INVITES: TableDefinition<&[u8; 16], (u64, bool)> = TableDefinition::new("i
 
 /// Our contacts. Key: the peer's id; value: the [`Contact`] in postcard.
 const CONTACTS: TableDefinition<&[u8; 32], &[u8]> = TableDefinition::new("contacts");
+
+/// Our shares. Key: the share's root hash; value: the [`Share`] in postcard.
+const SHARES: TableDefinition<&[u8; 32], &[u8]> = TableDefinition::new("shares");
+
+/// Who a share is for, and every hash it is made of.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub(super) struct Share {
+    /// Peers allowed to fetch it.
+    pub(super) recipients: Vec<PeerId>,
+    /// The root, its list of names and every file: all a recipient may ask for.
+    pub(super) hashes: Vec<ContentHash>,
+}
 
 /// Handle to the database file.
 #[derive(Debug)]
@@ -33,6 +47,7 @@ impl Db {
         tx.open_table(ALLOWED).map_err(Error::database)?;
         tx.open_table(INVITES).map_err(Error::database)?;
         tx.open_table(CONTACTS).map_err(Error::database)?;
+        tx.open_table(SHARES).map_err(Error::database)?;
         tx.commit().map_err(Error::database)?;
         Ok(Self(db))
     }
@@ -110,9 +125,29 @@ impl Db {
         tx.commit().map_err(Error::database)
     }
 
-    /// Deletes the contact and stops allowing them.
+    /// Deletes the contact, stops allowing them and takes them off every share.
     pub(super) fn remove_contact(&self, peer: PeerId) -> Result<(), Error> {
         let tx = self.0.begin_write().map_err(Error::database)?;
+        {
+            let mut table = tx.open_table(SHARES).map_err(Error::database)?;
+            let mut changed = Vec::new();
+            for row in table.iter().map_err(Error::database)? {
+                let (root, share) = row.map_err(Error::database)?;
+                let mut share: Share =
+                    postcard::from_bytes(share.value()).map_err(Error::database)?;
+                if share.recipients.contains(&peer) {
+                    share.recipients.retain(|p| *p != peer);
+                    changed.push((*root.value(), share));
+                }
+            }
+            // Written after reading: the table cannot change while it is being iterated.
+            for (root, share) in changed {
+                let bytes = postcard::to_allocvec(&share).expect("a share always serializes");
+                table
+                    .insert(&root, bytes.as_slice())
+                    .map_err(Error::database)?;
+            }
+        }
         tx.open_table(CONTACTS)
             .map_err(Error::database)?
             .remove(peer.as_ref())
@@ -122,6 +157,50 @@ impl Db {
             .remove(peer.as_ref())
             .map_err(Error::database)?;
         tx.commit().map_err(Error::database)
+    }
+
+    /// Saves a share, adding `recipients` to any it already had. Returns the
+    /// share as saved.
+    pub(super) fn add_share(
+        &self,
+        root: ContentHash,
+        recipients: &[PeerId],
+        hashes: Vec<ContentHash>,
+    ) -> Result<Share, Error> {
+        let tx = self.0.begin_write().map_err(Error::database)?;
+        let share = {
+            let mut table = tx.open_table(SHARES).map_err(Error::database)?;
+            let mut share: Share = match table.get(root.as_ref()).map_err(Error::database)? {
+                Some(row) => postcard::from_bytes(row.value()).map_err(Error::database)?,
+                None => Share::default(),
+            };
+            for peer in recipients {
+                if !share.recipients.contains(peer) {
+                    share.recipients.push(*peer);
+                }
+            }
+            share.hashes = hashes;
+            let bytes = postcard::to_allocvec(&share).expect("a share always serializes");
+            table
+                .insert(root.as_ref(), bytes.as_slice())
+                .map_err(Error::database)?;
+            share
+        };
+        tx.commit().map_err(Error::database)?;
+        Ok(share)
+    }
+
+    /// Every share, by root hash.
+    pub(super) fn shares(&self) -> Result<Vec<(ContentHash, Share)>, Error> {
+        let tx = self.0.begin_read().map_err(Error::database)?;
+        let table = tx.open_table(SHARES).map_err(Error::database)?;
+        let rows = table.iter().map_err(Error::database)?;
+        rows.map(|row| {
+            let (root, share) = row.map_err(Error::database)?;
+            let share = postcard::from_bytes(share.value()).map_err(Error::database)?;
+            Ok((ContentHash::from(*root.value()), share))
+        })
+        .collect()
     }
 
     /// Every contact.
@@ -222,5 +301,50 @@ mod tests {
         let db = Db::open(&path).unwrap();
         assert_eq!(db.contacts().unwrap(), vec![contact(2)]);
         assert_eq!(db.allowed().unwrap(), HashSet::from([contact(2).peer]));
+    }
+
+    #[test]
+    fn sharing_again_adds_recipients() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("caraxyn.redb");
+        let root = ContentHash::from([9; 32]);
+        let (bob, carol) = (PeerId::from([1; 32]), PeerId::from([2; 32]));
+        let hashes = vec![root, ContentHash::from([8; 32])];
+
+        let db = Db::open(&path).unwrap();
+        db.add_share(root, &[bob], hashes.clone()).unwrap();
+        db.add_share(root, &[carol, bob], hashes.clone()).unwrap();
+        drop(db);
+
+        let share = Share {
+            recipients: vec![bob, carol],
+            hashes,
+        };
+        assert_eq!(
+            Db::open(&path).unwrap().shares().unwrap(),
+            vec![(root, share)]
+        );
+    }
+
+    #[test]
+    fn removing_a_contact_takes_them_off_every_share() {
+        let dir = TempDir::new().unwrap();
+        let db = Db::open(&dir.path().join("caraxyn.redb")).unwrap();
+        let (bob, carol) = (contact(1), contact(2));
+        db.add_contact(&bob).unwrap();
+        let (one, two) = (ContentHash::from([7; 32]), ContentHash::from([8; 32]));
+        db.add_share(one, &[bob.peer, carol.peer], vec![one])
+            .unwrap();
+        db.add_share(two, &[bob.peer], vec![two]).unwrap();
+
+        db.remove_contact(bob.peer).unwrap();
+
+        let recipients: Vec<_> = db
+            .shares()
+            .unwrap()
+            .into_iter()
+            .map(|(root, share)| (root, share.recipients))
+            .collect();
+        assert_eq!(recipients, vec![(one, vec![carol.peer]), (two, vec![])]);
     }
 }
