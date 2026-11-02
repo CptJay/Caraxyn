@@ -846,3 +846,46 @@ async fn the_allow_list_survives_a_restart() {
     b.node.shutdown().await.unwrap();
     c.node.shutdown().await.unwrap();
 }
+
+#[tokio::test]
+async fn a_fetch_that_gets_nothing_leaves_no_tag() {
+    let lookup = MemoryLookup::new();
+    let (a, b) = (offline_node(&lookup).await, offline_node(&lookup).await);
+    let (_src, path) = write_file("x.txt", b"x");
+    let root = a.node.share_file(&path).await.unwrap();
+
+    // Not allowed: the sender refuses, so nothing arrives.
+    let refused = tokio::time::timeout(
+        Duration::from_secs(20),
+        b.node.fetch(a.node.peer_id(), root),
+    )
+    .await;
+
+    assert!(matches!(refused, Ok(Err(_))), "got {refused:?}");
+    assert_eq!(b.node.store.tags().delete_all().await.unwrap(), 0);
+    a.node.shutdown().await.unwrap();
+    b.node.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn a_partly_received_share_keeps_its_tag() {
+    let lookup = MemoryLookup::new();
+    let (a, b) = (offline_node(&lookup).await, offline_node(&lookup).await);
+    // The sender has the file list but not the file, so only the list arrives.
+    let root = Collection::from_iter([("x.txt".to_owned(), Hash::new(b"missing"))])
+        .store(&a.node.store)
+        .await
+        .unwrap();
+    a.node.allow(b.node.peer_id()).unwrap();
+
+    let result = tokio::time::timeout(
+        Duration::from_secs(20),
+        b.node.fetch(a.node.peer_id(), root.hash().into()),
+    )
+    .await;
+
+    assert!(matches!(result, Ok(Err(_))), "got {result:?}");
+    assert_eq!(b.node.store.tags().delete_all().await.unwrap(), 1);
+    a.node.shutdown().await.unwrap();
+    b.node.shutdown().await.unwrap();
+}

@@ -243,20 +243,36 @@ impl Node {
     pub async fn fetch(&self, from: PeerId, root: ContentHash) -> Result<(), Error> {
         let provider = EndpointId::from_bytes(from.as_ref()).map_err(|_| Error::InvalidPeerId)?;
         // Before the download, so garbage collection cannot delete half of it.
-        // Kept if the download fails, so a retry resumes with the verified chunks.
         self.store
             .tags()
             .set(recv_tag(root), HashAndFormat::hash_seq(root.into()))
             .await
             .map_err(Error::store)?;
-        self.store
+        let download = self
+            .store
             .downloader(self.router.endpoint())
             .download(
                 HashAndFormat::hash_seq(root.into()),
                 Shuffled::new(vec![provider]),
             )
-            .await
-            .map_err(Error::store)?;
+            .await;
+        if let Err(e) = download {
+            // The tag stays when the share's file list arrived, so a retry resumes.
+            // Without the list there is nothing to resume, and the tag would only
+            // make every garbage collection run log a warning. If the check itself
+            // fails, keep the tag: a leftover tag is harmless, lost data is not.
+            if !self
+                .store
+                .blobs()
+                .has(Hash::from(root))
+                .await
+                .unwrap_or(true)
+                && let Err(e) = self.store.tags().delete(recv_tag(root)).await
+            {
+                warn!(share = %root.short(), %e, "could not drop the tag of a failed fetch");
+            }
+            return Err(Error::store(e));
+        }
         info!(from = %from.short(), share = %root.short(), "share fetched");
         Ok(())
     }
