@@ -384,7 +384,7 @@ impl Node {
     }
 
     /// Writes one blob to `path`, creating its parent folders.
-    // shortcut: copies, so a received file takes its disk space twice (store + dest) until GC frees the store copy; moving it out instead breaks re-fetching once the user deletes the file.
+    // shortcut: copies, so a received file takes its disk space twice (store + dest) and nothing frees the store copy yet (GC is off); moving it out instead breaks re-fetching once the user deletes the file.
     async fn export_one(&self, hash: Hash, path: &Path) -> Result<(), Error> {
         if let Some(parent) = path.parent() {
             tokio::fs::create_dir_all(parent)
