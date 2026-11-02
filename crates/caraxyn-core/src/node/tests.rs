@@ -13,6 +13,14 @@ struct TestNode {
 /// Starts an offline node (no discovery, no relay) that other test nodes can
 /// find through `lookup`.
 async fn offline_node(lookup: &MemoryLookup) -> TestNode {
+    node_with_gc(lookup, GC_INTERVAL).await
+}
+
+/// Garbage collection interval for tests that want to see it run.
+const FAST_GC: Duration = Duration::from_millis(50);
+
+/// Like [`offline_node`], with its own garbage collection interval.
+async fn node_with_gc(lookup: &MemoryLookup, gc_interval: Duration) -> TestNode {
     // Shows logs with: RUST_LOG=caraxyn_core=debug cargo test -- --nocapture
     let _ = tracing_subscriber::fmt()
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
@@ -23,6 +31,7 @@ async fn offline_node(lookup: &MemoryLookup) -> TestNode {
         NodeConfig::new(dir.path()),
         presets::Minimal,
         Some(lookup.clone()),
+        gc_interval,
     )
     .await
     .unwrap();
@@ -139,7 +148,7 @@ async fn fetch_copies_a_small_file() {
     let (_src, path) = write_file("hello.txt", b"hello world");
     let root = a.node.share_file(&path).await.unwrap();
 
-    a.node.allow(b.node.peer_id());
+    a.node.allow(b.node.peer_id()).unwrap();
     b.node.fetch(a.node.peer_id(), root).await.unwrap();
 
     assert_eq!(
@@ -159,7 +168,7 @@ async fn fetch_streams_a_large_file() {
     let (_src, path) = write_file("big.bin", &content);
     let root = a.node.share_file(&path).await.unwrap();
 
-    a.node.allow(b.node.peer_id());
+    a.node.allow(b.node.peer_id()).unwrap();
     b.node.fetch(a.node.peer_id(), root).await.unwrap();
 
     assert_eq!(
@@ -174,7 +183,7 @@ async fn fetch_streams_a_large_file() {
 async fn fetching_an_unknown_hash_fails() {
     let lookup = MemoryLookup::new();
     let (a, b) = (offline_node(&lookup).await, offline_node(&lookup).await);
-    a.node.allow(b.node.peer_id());
+    a.node.allow(b.node.peer_id()).unwrap();
 
     let result = tokio::time::timeout(
         Duration::from_secs(20),
@@ -218,7 +227,7 @@ async fn a_stranger_is_refused_until_allowed() {
     assert!(matches!(refused, Ok(Err(_))), "got {refused:?}");
     assert!(Collection::load(root.into(), &b.node.store).await.is_err());
 
-    a.node.allow(b.node.peer_id());
+    a.node.allow(b.node.peer_id()).unwrap();
     b.node.fetch(a.node.peer_id(), root).await.unwrap();
     assert_eq!(read_share(&b.node, root).await.len(), 1);
     a.node.shutdown().await.unwrap();
@@ -231,8 +240,8 @@ async fn disallowed_peer_is_refused_again() {
     let (a, b) = (offline_node(&lookup).await, offline_node(&lookup).await);
     let (_src, path) = write_file("hello.txt", b"hello world");
     let root = a.node.share_file(&path).await.unwrap();
-    a.node.allow(b.node.peer_id());
-    a.node.disallow(b.node.peer_id());
+    a.node.allow(b.node.peer_id()).unwrap();
+    a.node.disallow(b.node.peer_id()).unwrap();
 
     let result = tokio::time::timeout(
         Duration::from_secs(20),
@@ -272,7 +281,7 @@ async fn fetched(content: &[u8], name: &str) -> (TestNode, TestNode, ContentHash
     let (a, b) = (offline_node(&lookup).await, offline_node(&lookup).await);
     let (_src, path) = write_file(name, content);
     let root = a.node.share_file(&path).await.unwrap();
-    a.node.allow(b.node.peer_id());
+    a.node.allow(b.node.peer_id()).unwrap();
     b.node.fetch(a.node.peer_id(), root).await.unwrap();
     (a, b, root)
 }
@@ -371,7 +380,7 @@ async fn a_folder_round_trips() {
         .share_folder(&src.path().join("photos"))
         .await
         .unwrap();
-    a.node.allow(b.node.peer_id());
+    a.node.allow(b.node.peer_id()).unwrap();
     b.node.fetch(a.node.peer_id(), root).await.unwrap();
     let out = TempDir::new().unwrap();
 
@@ -635,7 +644,14 @@ async fn a_saved_file_can_be_deleted_and_received_again() {
 #[tokio::test]
 async fn the_peer_id_survives_a_restart() {
     let dir = TempDir::new().unwrap();
-    let start = || Node::spawn_with(NodeConfig::new(dir.path()), presets::Minimal, None);
+    let start = || {
+        Node::spawn_with(
+            NodeConfig::new(dir.path()),
+            presets::Minimal,
+            None,
+            GC_INTERVAL,
+        )
+    };
 
     let first = start().await.unwrap();
     let id = first.peer_id();
@@ -649,11 +665,461 @@ async fn the_peer_id_survives_a_restart() {
 #[tokio::test]
 async fn a_second_node_cannot_use_the_same_data_dir() {
     let dir = TempDir::new().unwrap();
-    let start = || Node::spawn_with(NodeConfig::new(dir.path()), presets::Minimal, None);
+    let start = || {
+        Node::spawn_with(
+            NodeConfig::new(dir.path()),
+            presets::Minimal,
+            None,
+            GC_INTERVAL,
+        )
+    };
     let first = start().await.unwrap();
 
     let second = start().await;
 
     assert!(matches!(second, Err(Error::Store(_))), "got {second:?}");
     first.shutdown().await.unwrap();
+}
+
+/// Total size of all files under `dir`.
+fn disk_usage(dir: &Path) -> u64 {
+    std::fs::read_dir(dir)
+        .unwrap()
+        .map(|e| e.unwrap())
+        .map(|e| match e.file_type().unwrap().is_dir() {
+            true => disk_usage(&e.path()),
+            false => e.metadata().unwrap().len(),
+        })
+        .sum()
+}
+
+/// Waits until `done` holds, failing the test after 10 seconds.
+async fn wait_for(what: &str, done: impl Fn() -> bool) {
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while !done() {
+            tokio::time::sleep(FAST_GC).await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("timed out waiting until {what}"));
+}
+
+#[tokio::test]
+async fn a_received_share_is_kept_until_exported_then_freed() {
+    let lookup = MemoryLookup::new();
+    let a = offline_node(&lookup).await;
+    let b = node_with_gc(&lookup, FAST_GC).await;
+    let content = vec![5u8; 3 << 20];
+    let (_src, path) = write_file("big.bin", &content);
+    let root = a.node.share_file(&path).await.unwrap();
+    a.node.allow(b.node.peer_id()).unwrap();
+    b.node.fetch(a.node.peer_id(), root).await.unwrap();
+    let store_dir = b._dir.path().join("blobs");
+    let fetched = disk_usage(&store_dir);
+
+    // Several collection runs: the unexported share must survive them.
+    tokio::time::sleep(FAST_GC * 6).await;
+    let out = TempDir::new().unwrap();
+    b.node.export(root, out.path()).await.unwrap();
+    assert_eq!(std::fs::read(out.path().join("big.bin")).unwrap(), content);
+
+    wait_for("the store copy is freed", || {
+        disk_usage(&store_dir) + (3 << 20) <= fetched
+    })
+    .await;
+    a.node.shutdown().await.unwrap();
+    b.node.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn garbage_collection_keeps_our_shares_and_never_touches_shared_files() {
+    let lookup = MemoryLookup::new();
+    let a = node_with_gc(&lookup, FAST_GC).await;
+    let b = offline_node(&lookup).await;
+    // A big file is referenced in place, a small one is copied into the store.
+    let src = TempDir::new().unwrap();
+    let d = src.path().join("d");
+    std::fs::create_dir(&d).unwrap();
+    let big: Vec<u8> = (0..3 << 20).map(|i: u32| (i % 251) as u8).collect();
+    std::fs::write(d.join("big.bin"), &big).unwrap();
+    std::fs::write(d.join("small.txt"), b"small").unwrap();
+    let root = a.node.share_folder(&d).await.unwrap();
+
+    tokio::time::sleep(FAST_GC * 6).await;
+
+    assert_eq!(std::fs::read(d.join("big.bin")).unwrap(), big);
+    a.node.allow(b.node.peer_id()).unwrap();
+    b.node.fetch(a.node.peer_id(), root).await.unwrap();
+    assert_eq!(
+        read_share(&b.node, root).await,
+        vec![
+            ("d/big.bin".to_owned(), big),
+            ("d/small.txt".to_owned(), b"small".to_vec())
+        ]
+    );
+    a.node.shutdown().await.unwrap();
+    b.node.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn sharing_the_same_file_twice_leaves_one_tag() {
+    let a = offline_node(&MemoryLookup::new()).await;
+    let (_src, path) = write_file("a.txt", b"same");
+
+    a.node.share_file(&path).await.unwrap();
+    a.node.share_file(&path).await.unwrap();
+
+    assert_eq!(a.node.store.tags().delete_all().await.unwrap(), 1);
+    a.node.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn an_unexported_share_survives_a_restart_and_collection() {
+    let lookup = MemoryLookup::new();
+    let a = offline_node(&lookup).await;
+    let dir = TempDir::new().unwrap();
+    let start = || {
+        Node::spawn_with(
+            NodeConfig::new(dir.path()),
+            presets::Minimal,
+            Some(lookup.clone()),
+            FAST_GC,
+        )
+    };
+    let b = start().await.unwrap();
+    lookup.add_endpoint_info(b.router.endpoint().addr());
+    let (_src, path) = write_file("big.bin", &vec![6u8; 1 << 20]);
+    let root = a.node.share_file(&path).await.unwrap();
+    a.node.allow(b.peer_id()).unwrap();
+    b.fetch(a.node.peer_id(), root).await.unwrap();
+    b.shutdown().await.unwrap();
+    // The sender goes away: the share can only come from b's own store now.
+    a.node.shutdown().await.unwrap();
+
+    let b = start().await.unwrap();
+    tokio::time::sleep(FAST_GC * 6).await;
+    let out = TempDir::new().unwrap();
+
+    b.export(root, out.path()).await.unwrap();
+
+    assert_eq!(
+        std::fs::read(out.path().join("big.bin")).unwrap(),
+        vec![6u8; 1 << 20]
+    );
+    b.shutdown().await.unwrap();
+}
+
+/// Starts a node on `dir` that the other test nodes can find through `lookup`.
+async fn node_in(dir: &Path, lookup: &MemoryLookup) -> Node {
+    let node = Node::spawn_with(
+        NodeConfig::new(dir),
+        presets::Minimal,
+        Some(lookup.clone()),
+        GC_INTERVAL,
+    )
+    .await
+    .unwrap();
+    lookup.add_endpoint_info(node.router.endpoint().addr());
+    node
+}
+
+#[tokio::test]
+async fn the_allow_list_survives_a_restart() {
+    let lookup = MemoryLookup::new();
+    let dir = TempDir::new().unwrap();
+    let (b, c) = (offline_node(&lookup).await, offline_node(&lookup).await);
+    let a = node_in(dir.path(), &lookup).await;
+    let (_src, path) = write_file("hello.txt", b"hello");
+    let root = a.share_file(&path).await.unwrap();
+    a.allow(b.node.peer_id()).unwrap();
+    a.allow(c.node.peer_id()).unwrap();
+    a.disallow(c.node.peer_id()).unwrap();
+    a.shutdown().await.unwrap();
+
+    let a = node_in(dir.path(), &lookup).await;
+
+    b.node.fetch(a.peer_id(), root).await.unwrap();
+    let refused =
+        tokio::time::timeout(Duration::from_secs(20), c.node.fetch(a.peer_id(), root)).await;
+    assert!(matches!(refused, Ok(Err(_))), "got {refused:?}");
+    a.shutdown().await.unwrap();
+    b.node.shutdown().await.unwrap();
+    c.node.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn a_fetch_that_gets_nothing_leaves_no_tag() {
+    let lookup = MemoryLookup::new();
+    let (a, b) = (offline_node(&lookup).await, offline_node(&lookup).await);
+    let (_src, path) = write_file("x.txt", b"x");
+    let root = a.node.share_file(&path).await.unwrap();
+
+    // Not allowed: the sender refuses, so nothing arrives.
+    let refused = tokio::time::timeout(
+        Duration::from_secs(20),
+        b.node.fetch(a.node.peer_id(), root),
+    )
+    .await;
+
+    assert!(matches!(refused, Ok(Err(_))), "got {refused:?}");
+    assert_eq!(b.node.store.tags().delete_all().await.unwrap(), 0);
+    a.node.shutdown().await.unwrap();
+    b.node.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn a_partly_received_share_keeps_its_tag() {
+    let lookup = MemoryLookup::new();
+    let (a, b) = (offline_node(&lookup).await, offline_node(&lookup).await);
+    // The sender has the file list but not the file, so the fetch fails on the file.
+    let list = Collection::from_iter([("x.txt".to_owned(), Hash::new(b"missing"))]);
+    let root = list.clone().store(&a.node.store).await.unwrap();
+    // The receiver already has the list, as after an interrupted download. Not left
+    // to the network: when the sender gives up, QUIC may drop the list unread.
+    let _list_on_b = list.store(&b.node.store).await.unwrap();
+    a.node.allow(b.node.peer_id()).unwrap();
+
+    let result = tokio::time::timeout(
+        Duration::from_secs(20),
+        b.node.fetch(a.node.peer_id(), root.hash().into()),
+    )
+    .await;
+
+    assert!(matches!(result, Ok(Err(_))), "got {result:?}");
+    assert_eq!(b.node.store.tags().delete_all().await.unwrap(), 1);
+    a.node.shutdown().await.unwrap();
+    b.node.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn a_stranger_gets_a_control_answer_but_no_blobs() {
+    let lookup = MemoryLookup::new();
+    let (a, b) = (offline_node(&lookup).await, offline_node(&lookup).await);
+    let (_src, path) = write_file("hello.txt", b"hello");
+    let root = a.node.share_file(&path).await.unwrap();
+    let request = control::ControlMsg::ContactRequest {
+        token: crate::contacts::InviteToken::random(),
+        name: "B".into(),
+    };
+
+    let answer = b.node.request(a.node.peer_id(), &request).await.unwrap();
+
+    assert_eq!(answer, control::ControlMsg::ContactRejected);
+    let fetched = tokio::time::timeout(
+        Duration::from_secs(20),
+        b.node.fetch(a.node.peer_id(), root),
+    )
+    .await;
+    assert!(matches!(fetched, Ok(Err(_))), "got {fetched:?}");
+    a.node.shutdown().await.unwrap();
+    b.node.shutdown().await.unwrap();
+}
+
+/// Sends raw bytes as one control message on `conn` and reads the answer.
+async fn raw_request(
+    conn: &iroh::endpoint::Connection,
+    bytes: &[u8],
+) -> Result<control::ControlMsg, control::ControlError> {
+    let (mut tx, mut rx) = conn.open_bi().await.unwrap();
+    // The receiver may stop reading part way (too large): that is a refusal too.
+    if let Err(e) = tx.write_all(bytes).await {
+        return Err(control::ControlError::Stream(e.to_string()));
+    }
+    tx.finish().unwrap();
+    control::recv(&mut rx).await
+}
+
+#[tokio::test]
+async fn bad_control_messages_fail_only_their_own_stream() {
+    let lookup = MemoryLookup::new();
+    let (a, b) = (offline_node(&lookup).await, offline_node(&lookup).await);
+    let conn = b
+        .node
+        .router
+        .endpoint()
+        .connect(a.node.router.endpoint().id(), control::CONTROL_ALPN)
+        .await
+        .unwrap();
+    let valid = postcard::to_allocvec(&control::ControlMsg::ContactRequest {
+        token: crate::contacts::InviteToken::random(),
+        name: "B".into(),
+    })
+    .unwrap();
+
+    let too_large = raw_request(&conn, &vec![0u8; 2 << 20]).await;
+    let garbage = raw_request(&conn, b"\xff\xff garbage").await;
+    // An answer sent as a request is refused too.
+    let answer_as_request = raw_request(
+        &conn,
+        &postcard::to_allocvec(&control::ControlMsg::ContactRejected).unwrap(),
+    )
+    .await;
+    let still_works = raw_request(&conn, &valid).await;
+
+    for result in [too_large, garbage, answer_as_request] {
+        assert!(result.is_err(), "got {result:?}");
+    }
+    assert_eq!(still_works.unwrap(), control::ControlMsg::ContactRejected);
+    a.node.shutdown().await.unwrap();
+    b.node.shutdown().await.unwrap();
+}
+
+/// Whether `from` can fetch `root` from `to` (a refusal is `false`).
+async fn can_fetch(from: &Node, to: &Node, root: ContentHash) -> bool {
+    let result =
+        tokio::time::timeout(Duration::from_secs(20), from.fetch(to.peer_id(), root)).await;
+    matches!(result, Ok(Ok(())))
+}
+
+#[tokio::test]
+async fn an_invite_makes_two_devices_mutual_contacts() {
+    let lookup = MemoryLookup::new();
+    let (a, b) = (offline_node(&lookup).await, offline_node(&lookup).await);
+    let (_sa, pa) = write_file("from-a.txt", b"a");
+    let (_sb, pb) = write_file("from-b.txt", b"b");
+    let (root_a, root_b) = (
+        a.node.share_file(&pa).await.unwrap(),
+        b.node.share_file(&pb).await.unwrap(),
+    );
+
+    let code = a.node.create_invite("Alice").unwrap();
+    let alice = b.node.redeem_invite(&code, "Bob").await.unwrap();
+
+    assert_eq!(
+        (alice.peer, alice.name.as_str()),
+        (a.node.peer_id(), "Alice")
+    );
+    let a_contacts = a.node.contacts().unwrap();
+    assert_eq!(a_contacts.len(), 1);
+    assert_eq!(
+        (a_contacts[0].peer, a_contacts[0].name.as_str()),
+        (b.node.peer_id(), "Bob")
+    );
+    assert_eq!(b.node.contacts().unwrap(), vec![alice]);
+    assert!(can_fetch(&b.node, &a.node, root_a).await);
+    assert!(can_fetch(&a.node, &b.node, root_b).await);
+    a.node.shutdown().await.unwrap();
+    b.node.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn an_invite_works_only_once() {
+    let lookup = MemoryLookup::new();
+    let (a, b, c) = (
+        offline_node(&lookup).await,
+        offline_node(&lookup).await,
+        offline_node(&lookup).await,
+    );
+    let (_src, path) = write_file("x.txt", b"x");
+    let root = a.node.share_file(&path).await.unwrap();
+    let code = a.node.create_invite("Alice").unwrap();
+    b.node.redeem_invite(&code, "Bob").await.unwrap();
+
+    let second = c.node.redeem_invite(&code, "Carol").await;
+
+    assert!(
+        matches!(second, Err(Error::ContactRejected)),
+        "got {second:?}"
+    );
+    assert!(c.node.contacts().unwrap().is_empty());
+    assert_eq!(a.node.contacts().unwrap().len(), 1);
+    assert!(!can_fetch(&c.node, &a.node, root).await);
+    for n in [a, b, c] {
+        n.node.shutdown().await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn a_forged_invite_is_rejected() {
+    let lookup = MemoryLookup::new();
+    let (a, b) = (offline_node(&lookup).await, offline_node(&lookup).await);
+    // A's real id and a name, but a token A never issued.
+    let forged = crate::contacts::encode_invite(&Invite {
+        peer: a.node.peer_id(),
+        name: "Alice".into(),
+        token: InviteToken::random(),
+    })
+    .unwrap();
+
+    let result = b.node.redeem_invite(&forged, "Bob").await;
+
+    assert!(
+        matches!(result, Err(Error::ContactRejected)),
+        "got {result:?}"
+    );
+    assert!(a.node.contacts().unwrap().is_empty());
+    a.node.shutdown().await.unwrap();
+    b.node.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn a_hostile_name_is_rejected_and_the_token_stays_unused() {
+    let lookup = MemoryLookup::new();
+    let (a, b) = (offline_node(&lookup).await, offline_node(&lookup).await);
+    let code = a.node.create_invite("Alice").unwrap();
+    let token = crate::contacts::decode_invite(&code).unwrap().token;
+    // Sent by hand: our own redeem_invite would refuse this name before sending.
+    let hostile = control::ControlMsg::ContactRequest {
+        token,
+        name: "Bob\u{1b}[31m".into(),
+    };
+
+    let answer = b.node.request(a.node.peer_id(), &hostile).await.unwrap();
+
+    assert_eq!(answer, control::ControlMsg::ContactRejected);
+    assert!(a.node.contacts().unwrap().is_empty());
+    // A bad request does not use up the invite.
+    b.node.redeem_invite(&code, "Bob").await.unwrap();
+    a.node.shutdown().await.unwrap();
+    b.node.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn contacts_survive_a_restart_and_removal_refuses_them() {
+    let lookup = MemoryLookup::new();
+    let dir = TempDir::new().unwrap();
+    let a = node_in(dir.path(), &lookup).await;
+    let b = offline_node(&lookup).await;
+    let (_src, path) = write_file("x.txt", b"x");
+    let root = a.share_file(&path).await.unwrap();
+    let code = a.create_invite("Alice").unwrap();
+    b.node.redeem_invite(&code, "Bob").await.unwrap();
+    a.shutdown().await.unwrap();
+
+    let a = node_in(dir.path(), &lookup).await;
+    assert_eq!(a.contacts().unwrap().len(), 1);
+    assert!(can_fetch(&b.node, &a, root).await);
+
+    a.remove_contact(b.node.peer_id()).unwrap();
+
+    assert!(a.contacts().unwrap().is_empty());
+    let (_src2, path2) = write_file("y.txt", b"y");
+    let root2 = a.share_file(&path2).await.unwrap();
+    assert!(!can_fetch(&b.node, &a, root2).await);
+    a.shutdown().await.unwrap();
+    b.node.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn bad_codes_and_names_fail_before_any_network() {
+    let a = offline_node(&MemoryLookup::new()).await;
+
+    let bad_code = a.node.redeem_invite("hello", "Bob").await;
+    let bad_own_name = a.node.create_invite("");
+    let code = a.node.create_invite("Alice").unwrap();
+    let bad_redeem_name = a.node.redeem_invite(&code, "\u{7}").await;
+
+    assert!(
+        matches!(bad_code, Err(Error::InvalidInvite(_))),
+        "got {bad_code:?}"
+    );
+    assert!(
+        matches!(bad_own_name, Err(Error::InvalidInvite(_))),
+        "got {bad_own_name:?}"
+    );
+    assert!(
+        matches!(bad_redeem_name, Err(Error::InvalidInvite(_))),
+        "got {bad_redeem_name:?}"
+    );
+    a.node.shutdown().await.unwrap();
 }

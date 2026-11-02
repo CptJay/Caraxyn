@@ -5,9 +5,14 @@ edition.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+data-encoding = { workspace = true }
 hex = { workspace = true }
 iroh = { workspace = true }
 iroh-blobs = { workspace = true }
+postcard = { workspace = true }
+rand = { workspace = true }
+redb = { workspace = true }
+serde = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }

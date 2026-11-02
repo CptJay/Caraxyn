@@ -4,7 +4,7 @@ use std::path::PathBuf;
 
 use thiserror::Error;
 
-use crate::safe_name::NameError;
+use crate::{contacts::InviteError, safe_name::NameError};
 
 /// Anything that can go wrong in `caraxyn-core`.
 ///
@@ -46,6 +46,20 @@ pub enum Error {
         /// Why it was rejected.
         reason: NameError,
     },
+    /// The invite code is not valid, or the name given is not.
+    #[error("invalid invite: {0}")]
+    InvalidInvite(InviteError),
+    /// The other device refused the invite: unknown, already used or expired.
+    #[error("the invite was refused (it may be used or expired)")]
+    ContactRejected,
+    /// A control message to another node could not be sent or answered.
+    // shortcut: message only, like Store; split into variants when callers need to match.
+    #[error("control message failed: {0}")]
+    Control(String),
+    /// Caraxyn's own database could not be opened, read or written.
+    // shortcut: message only, like Store; split into variants when callers need to match.
+    #[error("database error: {0}")]
+    Database(String),
     /// The secret key file exists but does not hold a key. It is left as it is.
     #[error("{} is not a valid secret key file", .0.display())]
     InvalidKeyFile(PathBuf),
@@ -58,6 +72,11 @@ impl Error {
     /// Wraps a blob store error, keeping only its message.
     pub(crate) fn store(e: impl std::fmt::Display) -> Self {
         Self::Store(e.to_string())
+    }
+
+    /// Wraps a database error, keeping only its message.
+    pub(crate) fn database(e: impl std::fmt::Display) -> Self {
+        Self::Database(e.to_string())
     }
 
     /// For `map_err`: wraps an io error together with the path it happened at.
