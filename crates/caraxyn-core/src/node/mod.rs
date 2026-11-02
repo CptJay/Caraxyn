@@ -275,7 +275,8 @@ impl Node {
         self.access.db().contacts()
     }
 
-    /// Removes a contact; from then on they cannot fetch from this node.
+    /// Removes a contact and takes them off every share; from then on they
+    /// cannot fetch from this node, even if they become a contact again later.
     /// They are not told. A transfer already running is not cut.
     ///
     /// # Errors
@@ -645,18 +646,21 @@ async fn run_blob_gate(
             ProviderMessage::ConnectionClosed(m) => {
                 peers.remove(&m.connection_id);
             }
+            // Allowed checked again per request: a peer removed while its connection
+            // stays open must not get anything new on it.
             ProviderMessage::GetRequestReceived(m) => {
                 let as_list = !m.request.ranges.is_blob();
-                let ok = peers
-                    .get(&m.connection_id)
-                    .is_some_and(|peer| access.may_get(*peer, m.request.hash.into(), as_list));
+                let ok = peers.get(&m.connection_id).is_some_and(|peer| {
+                    access.is_allowed(*peer)
+                        && access.may_get(*peer, m.request.hash.into(), as_list)
+                });
                 m.tx.send(verdict(ok)).await.ok();
             }
             // "Do you have this?" reveals what is in the store, so the same rule applies.
             ProviderMessage::ObserveRequestReceived(m) => {
-                let ok = peers
-                    .get(&m.connection_id)
-                    .is_some_and(|peer| access.may_get(*peer, m.request.hash.into(), false));
+                let ok = peers.get(&m.connection_id).is_some_and(|peer| {
+                    access.is_allowed(*peer) && access.may_get(*peer, m.request.hash.into(), false)
+                });
                 m.tx.send(verdict(ok)).await.ok();
             }
             _ => {}

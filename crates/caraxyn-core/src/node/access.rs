@@ -119,8 +119,16 @@ impl Access {
     }
 
     pub(super) fn remove_contact(&self, peer: PeerId) -> Result<(), Error> {
-        self.change(peer, false, |db| db.remove_contact(peer).map(|()| true))
-            .map(drop)
+        // Both locks held across the save (always this order), so neither copy can
+        // disagree with the disk.
+        let mut allowed = self.allowed.write().expect("allow-list lock poisoned");
+        let mut shares = self.shares.write().expect("share lock poisoned");
+        self.db.remove_contact(peer)?;
+        allowed.remove(&peer);
+        for recipients in shares.recipients.values_mut() {
+            recipients.remove(&peer);
+        }
+        Ok(())
     }
 
     /// Adds `contact` if `token` is valid at `now`; returns whether it was.

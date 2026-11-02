@@ -125,9 +125,29 @@ impl Db {
         tx.commit().map_err(Error::database)
     }
 
-    /// Deletes the contact and stops allowing them.
+    /// Deletes the contact, stops allowing them and takes them off every share.
     pub(super) fn remove_contact(&self, peer: PeerId) -> Result<(), Error> {
         let tx = self.0.begin_write().map_err(Error::database)?;
+        {
+            let mut table = tx.open_table(SHARES).map_err(Error::database)?;
+            let mut changed = Vec::new();
+            for row in table.iter().map_err(Error::database)? {
+                let (root, share) = row.map_err(Error::database)?;
+                let mut share: Share =
+                    postcard::from_bytes(share.value()).map_err(Error::database)?;
+                if share.recipients.contains(&peer) {
+                    share.recipients.retain(|p| *p != peer);
+                    changed.push((*root.value(), share));
+                }
+            }
+            // Written after reading: the table cannot change while it is being iterated.
+            for (root, share) in changed {
+                let bytes = postcard::to_allocvec(&share).expect("a share always serializes");
+                table
+                    .insert(&root, bytes.as_slice())
+                    .map_err(Error::database)?;
+            }
+        }
         tx.open_table(CONTACTS)
             .map_err(Error::database)?
             .remove(peer.as_ref())
@@ -304,5 +324,27 @@ mod tests {
             Db::open(&path).unwrap().shares().unwrap(),
             vec![(root, share)]
         );
+    }
+
+    #[test]
+    fn removing_a_contact_takes_them_off_every_share() {
+        let dir = TempDir::new().unwrap();
+        let db = Db::open(&dir.path().join("caraxyn.redb")).unwrap();
+        let (bob, carol) = (contact(1), contact(2));
+        db.add_contact(&bob).unwrap();
+        let (one, two) = (ContentHash::from([7; 32]), ContentHash::from([8; 32]));
+        db.add_share(one, &[bob.peer, carol.peer], vec![one])
+            .unwrap();
+        db.add_share(two, &[bob.peer], vec![two]).unwrap();
+
+        db.remove_contact(bob.peer).unwrap();
+
+        let recipients: Vec<_> = db
+            .shares()
+            .unwrap()
+            .into_iter()
+            .map(|(root, share)| (root, share.recipients))
+            .collect();
+        assert_eq!(recipients, vec![(one, vec![carol.peer]), (two, vec![])]);
     }
 }

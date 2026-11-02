@@ -882,7 +882,8 @@ async fn a_fetch_that_gets_nothing_leaves_no_tag() {
 async fn a_partly_received_share_keeps_its_tag() {
     let lookup = MemoryLookup::new();
     let (a, b) = (offline_node(&lookup).await, offline_node(&lookup).await);
-    // The sender has the file list but not the file, so the fetch fails on the file.
+    // A hand-made list the sender never shared (it lacks the file), so the fetch is
+    // refused; what matters is that the receiver already holds the list.
     let list = Collection::from_iter([("x.txt".to_owned(), Hash::new(b"missing"))]);
     let root = list.clone().store(&a.node.store).await.unwrap();
     // The receiver already has the list, as after an interrupted download. Not left
@@ -1330,4 +1331,50 @@ async fn received_content_is_not_passed_on() {
     for n in [a, b, c] {
         n.node.shutdown().await.unwrap();
     }
+}
+
+#[tokio::test]
+async fn a_removed_peer_gets_nothing_new_on_a_connection_it_keeps_open() {
+    let (a, b, c, x, _) = two_shares().await;
+    let file_x = file_hash(&a.node, x).await;
+    let conn = blob_conn(&b.node, &a.node).await;
+    let get = |hash| {
+        let request = iroh_blobs::protocol::GetRequest::blob(hash);
+        b.node.store.remote().execute_get(conn.clone(), request)
+    };
+    assert!(get(file_x).await.is_ok());
+
+    a.node.disallow(b.node.peer_id()).unwrap();
+
+    // The list of x is not in B's store yet, so this is a real new request.
+    let after = get(x.into()).await;
+    assert!(after.is_err(), "got {after:?}");
+    for n in [a, b, c] {
+        n.node.shutdown().await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn a_removed_contact_invited_again_does_not_get_old_shares_back() {
+    let lookup = MemoryLookup::new();
+    let (a, b) = (offline_node(&lookup).await, offline_node(&lookup).await);
+    let first = a.node.create_invite("Alice").unwrap();
+    b.node.redeem_invite(&first, "Bob").await.unwrap();
+    let (_src, path) = write_file("old.txt", b"old");
+    let old = a.node.share_file(&path, &[b.node.peer_id()]).await.unwrap();
+
+    a.node.remove_contact(b.node.peer_id()).unwrap();
+    let again = a.node.create_invite("Alice").unwrap();
+    b.node.redeem_invite(&again, "Bob").await.unwrap();
+
+    assert!(!can_fetch(&b.node, &a.node, old).await);
+    let (_src2, path2) = write_file("new.txt", b"new");
+    let new = a
+        .node
+        .share_file(&path2, &[b.node.peer_id()])
+        .await
+        .unwrap();
+    assert!(can_fetch(&b.node, &a.node, new).await);
+    a.node.shutdown().await.unwrap();
+    b.node.shutdown().await.unwrap();
 }
