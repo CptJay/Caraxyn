@@ -176,6 +176,7 @@ impl Node {
         });
         let router = Router::builder(endpoint)
             .accept(iroh_blobs::ALPN, BlobsProtocol::new(&store, Some(events)))
+            .accept(control::CONTROL_ALPN, control::ControlHandler)
             .spawn();
         let node = Self {
             router,
@@ -225,6 +226,31 @@ impl Node {
             list.remove(&peer);
         }
         Ok(())
+    }
+
+    /// Sends one control message to `peer` and waits for its answer.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "used by the contact flow (step C)")
+    )]
+    async fn request(
+        &self,
+        peer: PeerId,
+        msg: &control::ControlMsg,
+    ) -> Result<control::ControlMsg, Error> {
+        let id = EndpointId::from_bytes(peer.as_ref()).map_err(|_| Error::InvalidPeerId)?;
+        let failed = |e: &dyn std::fmt::Display| Error::Control(e.to_string());
+        let conn = self
+            .router
+            .endpoint()
+            .connect(id, control::CONTROL_ALPN)
+            .await
+            .map_err(|e| failed(&e))?;
+        let (mut tx, mut rx) = conn.open_bi().await.map_err(|e| failed(&e))?;
+        control::send(&mut tx, msg).await.map_err(|e| failed(&e))?;
+        let answer = control::recv(&mut rx).await.map_err(|e| failed(&e));
+        conn.close(0u32.into(), b"done");
+        answer
     }
 
     /// Downloads a share from another node into our own store.
@@ -515,6 +541,7 @@ fn file_name(path: &Path) -> Result<String, Error> {
         .ok_or(Error::InvalidPath)
 }
 
+mod control;
 mod db;
 mod key;
 

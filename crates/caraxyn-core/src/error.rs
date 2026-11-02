@@ -46,6 +46,10 @@ pub enum Error {
         /// Why it was rejected.
         reason: NameError,
     },
+    /// A control message to another node could not be sent or answered.
+    // shortcut: message only, like Store; split into variants when callers need to match.
+    #[error("control message failed: {0}")]
+    Control(String),
     /// Caraxyn's own database could not be opened, read or written.
     // shortcut: message only, like Store; split into variants when callers need to match.
     #[error("database error: {0}")]

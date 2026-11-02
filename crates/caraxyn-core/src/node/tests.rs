@@ -889,3 +889,76 @@ async fn a_partly_received_share_keeps_its_tag() {
     a.node.shutdown().await.unwrap();
     b.node.shutdown().await.unwrap();
 }
+
+#[tokio::test]
+async fn a_stranger_gets_a_control_answer_but_no_blobs() {
+    let lookup = MemoryLookup::new();
+    let (a, b) = (offline_node(&lookup).await, offline_node(&lookup).await);
+    let (_src, path) = write_file("hello.txt", b"hello");
+    let root = a.node.share_file(&path).await.unwrap();
+    let request = control::ControlMsg::ContactRequest {
+        token: crate::contacts::InviteToken::random(),
+        name: "B".into(),
+    };
+
+    let answer = b.node.request(a.node.peer_id(), &request).await.unwrap();
+
+    assert_eq!(answer, control::ControlMsg::ContactRejected);
+    let fetched = tokio::time::timeout(
+        Duration::from_secs(20),
+        b.node.fetch(a.node.peer_id(), root),
+    )
+    .await;
+    assert!(matches!(fetched, Ok(Err(_))), "got {fetched:?}");
+    a.node.shutdown().await.unwrap();
+    b.node.shutdown().await.unwrap();
+}
+
+/// Sends raw bytes as one control message on `conn` and reads the answer.
+async fn raw_request(
+    conn: &iroh::endpoint::Connection,
+    bytes: &[u8],
+) -> Result<control::ControlMsg, control::ControlError> {
+    let (mut tx, mut rx) = conn.open_bi().await.unwrap();
+    // The receiver may stop reading part way (too large): that is a refusal too.
+    if let Err(e) = tx.write_all(bytes).await {
+        return Err(control::ControlError::Stream(e.to_string()));
+    }
+    tx.finish().unwrap();
+    control::recv(&mut rx).await
+}
+
+#[tokio::test]
+async fn bad_control_messages_fail_only_their_own_stream() {
+    let lookup = MemoryLookup::new();
+    let (a, b) = (offline_node(&lookup).await, offline_node(&lookup).await);
+    let conn = b
+        .node
+        .router
+        .endpoint()
+        .connect(a.node.router.endpoint().id(), control::CONTROL_ALPN)
+        .await
+        .unwrap();
+    let valid = postcard::to_allocvec(&control::ControlMsg::ContactRequest {
+        token: crate::contacts::InviteToken::random(),
+        name: "B".into(),
+    })
+    .unwrap();
+
+    let too_large = raw_request(&conn, &vec![0u8; 2 << 20]).await;
+    let garbage = raw_request(&conn, b"\xff\xff garbage").await;
+    // An answer sent as a request is refused too.
+    let answer_as_request = raw_request(
+        &conn,
+        &postcard::to_allocvec(&control::ControlMsg::ContactRejected).unwrap(),
+    )
+    .await;
+    let still_works = raw_request(&conn, &valid).await;
+
+    for result in [too_large, garbage, answer_as_request] {
+        assert!(result.is_err(), "got {result:?}");
+    }
+    assert_eq!(still_works.unwrap(), control::ControlMsg::ContactRejected);
+    a.node.shutdown().await.unwrap();
+    b.node.shutdown().await.unwrap();
+}
