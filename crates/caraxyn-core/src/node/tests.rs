@@ -134,6 +134,7 @@ async fn fetch_copies_a_small_file() {
     let (_src, path) = write_file("hello.txt", b"hello world");
     let root = a.node.share_file(&path).await.unwrap();
 
+    a.node.allow(b.node.peer_id());
     b.node.fetch(a.node.peer_id(), root).await.unwrap();
 
     assert_eq!(
@@ -153,6 +154,7 @@ async fn fetch_streams_a_large_file() {
     let (_src, path) = write_file("big.bin", &content);
     let root = a.node.share_file(&path).await.unwrap();
 
+    a.node.allow(b.node.peer_id());
     b.node.fetch(a.node.peer_id(), root).await.unwrap();
 
     assert_eq!(
@@ -167,6 +169,7 @@ async fn fetch_streams_a_large_file() {
 async fn fetching_an_unknown_hash_fails() {
     let lookup = MemoryLookup::new();
     let (a, b) = (offline_node(&lookup).await, offline_node(&lookup).await);
+    a.node.allow(b.node.peer_id());
 
     let result = tokio::time::timeout(
         Duration::from_secs(20),
@@ -191,5 +194,48 @@ async fn fetching_from_a_stopped_node_fails() {
     let result = tokio::time::timeout(Duration::from_secs(60), b.node.fetch(a_id, root)).await;
 
     assert!(matches!(result, Ok(Err(_))), "got {result:?}");
+    b.node.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn a_stranger_is_refused_until_allowed() {
+    let lookup = MemoryLookup::new();
+    let (a, b) = (offline_node(&lookup).await, offline_node(&lookup).await);
+    let (_src, path) = write_file("hello.txt", b"hello world");
+    let root = a.node.share_file(&path).await.unwrap();
+
+    let refused = tokio::time::timeout(
+        Duration::from_secs(20),
+        b.node.fetch(a.node.peer_id(), root),
+    )
+    .await;
+    println!("refusal surfaces as: {refused:?}");
+    assert!(matches!(refused, Ok(Err(_))), "got {refused:?}");
+    assert!(Collection::load(root.into(), &b.node.store).await.is_err());
+
+    a.node.allow(b.node.peer_id());
+    b.node.fetch(a.node.peer_id(), root).await.unwrap();
+    assert_eq!(read_share(&b.node, root).await.len(), 1);
+    a.node.shutdown().await.unwrap();
+    b.node.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn disallowed_peer_is_refused_again() {
+    let lookup = MemoryLookup::new();
+    let (a, b) = (offline_node(&lookup).await, offline_node(&lookup).await);
+    let (_src, path) = write_file("hello.txt", b"hello world");
+    let root = a.node.share_file(&path).await.unwrap();
+    a.node.allow(b.node.peer_id());
+    a.node.disallow(b.node.peer_id());
+
+    let result = tokio::time::timeout(
+        Duration::from_secs(20),
+        b.node.fetch(a.node.peer_id(), root),
+    )
+    .await;
+
+    assert!(matches!(result, Ok(Err(_))), "got {result:?}");
+    a.node.shutdown().await.unwrap();
     b.node.shutdown().await.unwrap();
 }

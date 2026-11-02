@@ -3,7 +3,11 @@
 //! This is the only module that talks to iroh directly; everything else
 //! sees Caraxyn's own types.
 
-use std::path::{Path, PathBuf};
+use std::{
+    collections::HashSet,
+    path::{Path, PathBuf},
+    sync::{Arc, RwLock},
+};
 
 use iroh::{
     Endpoint, EndpointId,
@@ -19,6 +23,7 @@ use iroh_blobs::{
         downloader::Shuffled,
     },
     format::collection::Collection,
+    provider::events::{AbortReason, ConnectMode, EventMask, EventSender, ProviderMessage},
     store::fs::FsStore,
 };
 use tracing::info;
@@ -69,6 +74,8 @@ pub struct Node {
     /// Owns the endpoint and answers incoming blob requests from the store.
     router: Router,
     store: Store,
+    /// Peers allowed to fetch from us; everyone else is refused on connect.
+    allowed: Arc<RwLock<HashSet<PeerId>>>,
 }
 
 impl Node {
@@ -98,10 +105,41 @@ impl Node {
             builder = builder.address_lookup(lookup);
         }
         let endpoint = builder.bind().await?;
+        let allowed = Arc::new(RwLock::new(HashSet::new()));
+        let (events, mut requests) = EventSender::channel(
+            16,
+            EventMask {
+                connected: ConnectMode::Intercept,
+                ..EventMask::DEFAULT
+            },
+        );
+        let gate = Arc::clone(&allowed);
+        // Ends by itself when the router (and with it the sender) is dropped.
+        tokio::spawn(async move {
+            while let Some(msg) = requests.recv().await {
+                if let ProviderMessage::ClientConnected(m) = msg {
+                    let ok = m.endpoint_id.is_some_and(|id| {
+                        gate.read()
+                            .expect("allow-list lock poisoned")
+                            .contains(&PeerId::from(id))
+                    });
+                    let verdict = if ok {
+                        Ok(())
+                    } else {
+                        Err(AbortReason::Permission)
+                    };
+                    m.tx.send(verdict).await.ok();
+                }
+            }
+        });
         let router = Router::builder(endpoint)
-            .accept(iroh_blobs::ALPN, BlobsProtocol::new(&store, None))
+            .accept(iroh_blobs::ALPN, BlobsProtocol::new(&store, Some(events)))
             .spawn();
-        let node = Self { router, store };
+        let node = Self {
+            router,
+            store,
+            allowed,
+        };
         info!(peer = %node.peer_id().short(), "node started");
         Ok(node)
     }
@@ -112,6 +150,25 @@ impl Node {
         self.router.endpoint().id().into()
     }
 
+    /// Lets `peer` fetch from this node. Nobody is allowed by default.
+    ///
+    /// The list lives in memory only. It is checked when a peer connects, so
+    /// every share on this node is open to every allowed peer.
+    pub fn allow(&self, peer: PeerId) {
+        self.allowed
+            .write()
+            .expect("allow-list lock poisoned")
+            .insert(peer);
+    }
+
+    /// Stops `peer` from connecting again. A transfer already running is not cut.
+    pub fn disallow(&self, peer: PeerId) {
+        self.allowed
+            .write()
+            .expect("allow-list lock poisoned")
+            .remove(&peer);
+    }
+
     /// Downloads a share from another node into our own store.
     ///
     /// Everything is verified against its hash while it streams in. Returns
@@ -120,7 +177,9 @@ impl Node {
     /// # Errors
     ///
     /// [`Error::InvalidPeerId`] if `from` is not a valid key, [`Error::Store`]
-    /// if the peer is unreachable, does not have the share, or sends bad data.
+    /// if the peer is unreachable, does not have the share, refuses us, or sends
+    /// bad data.
+    // shortcut: iroh reports a refusal as a plain failed download, so it cannot be told apart yet; add Error::Refused if a caller needs it.
     pub async fn fetch(&self, from: PeerId, root: ContentHash) -> Result<(), Error> {
         let provider = EndpointId::from_bytes(from.as_ref()).map_err(|_| Error::InvalidPeerId)?;
         self.store
