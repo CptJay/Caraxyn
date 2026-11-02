@@ -4,7 +4,7 @@ use std::path::PathBuf;
 
 use thiserror::Error;
 
-use crate::safe_name::NameError;
+use crate::{contacts::InviteError, safe_name::NameError};
 
 /// Anything that can go wrong in `caraxyn-core`.
 ///
@@ -46,6 +46,12 @@ pub enum Error {
         /// Why it was rejected.
         reason: NameError,
     },
+    /// The invite code is not valid, or the name given is not.
+    #[error("invalid invite: {0}")]
+    InvalidInvite(InviteError),
+    /// The other device refused the invite: unknown, already used or expired.
+    #[error("the invite was refused (it may be used or expired)")]
+    ContactRejected,
     /// A control message to another node could not be sent or answered.
     // shortcut: message only, like Store; split into variants when callers need to match.
     #[error("control message failed: {0}")]

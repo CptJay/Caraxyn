@@ -6,7 +6,7 @@
 use std::{
     collections::HashSet,
     path::{Path, PathBuf},
-    sync::{Arc, RwLock},
+    sync::Arc,
     time::Duration,
 };
 
@@ -33,6 +33,10 @@ use iroh_blobs::{
 use tracing::{info, warn};
 
 use crate::{
+    contacts::{
+        Contact, Invite, InviteToken, check_name as check_display_name, decode_invite,
+        encode_invite, now_ms,
+    },
     error::Error,
     ids::{ContentHash, PeerId},
     safe_name,
@@ -93,10 +97,8 @@ pub struct Node {
     /// Owns the endpoint and answers incoming blob requests from the store.
     router: Router,
     store: Store,
-    /// Peers allowed to fetch from us; everyone else is refused on connect.
-    /// A copy of the database's list, so the check never reads the disk.
-    allowed: Arc<RwLock<HashSet<PeerId>>>,
-    db: Arc<db::Db>,
+    /// Who may fetch from us; everyone else is refused on connect.
+    access: Arc<access::Access>,
 }
 
 impl Node {
@@ -139,7 +141,7 @@ impl Node {
         // After the store: it locks `data_dir`, so two nodes never race to create the key.
         let key = key::load_or_create(&config.data_dir.join("secret.key"))?;
         let db = db::Db::open(&config.data_dir.join("caraxyn.redb"))?;
-        let allowed = Arc::new(RwLock::new(db.allowed()?));
+        let access = Arc::new(access::Access::new(db)?);
         let mut builder = Endpoint::builder(preset).secret_key(key);
         if let Some(lookup) = lookup {
             builder = builder.address_lookup(lookup);
@@ -155,16 +157,12 @@ impl Node {
                 ..EventMask::DEFAULT
             },
         );
-        let gate = Arc::clone(&allowed);
+        let gate = Arc::clone(&access);
         // Ends by itself when the router (and with it the sender) is dropped.
         tokio::spawn(async move {
             while let Some(msg) = requests.recv().await {
                 if let ProviderMessage::ClientConnected(m) = msg {
-                    let ok = m.endpoint_id.is_some_and(|id| {
-                        gate.read()
-                            .expect("allow-list lock poisoned")
-                            .contains(&PeerId::from(id))
-                    });
+                    let ok = m.endpoint_id.is_some_and(|id| gate.is_allowed(id.into()));
                     let verdict = if ok {
                         Ok(())
                     } else {
@@ -176,13 +174,17 @@ impl Node {
         });
         let router = Router::builder(endpoint)
             .accept(iroh_blobs::ALPN, BlobsProtocol::new(&store, Some(events)))
-            .accept(control::CONTROL_ALPN, control::ControlHandler)
+            .accept(
+                control::CONTROL_ALPN,
+                control::ControlHandler {
+                    access: Arc::clone(&access),
+                },
+            )
             .spawn();
         let node = Self {
             router,
             store,
-            allowed,
-            db: Arc::new(db),
+            access,
         };
         info!(peer = %node.peer_id().short(), "node started");
         Ok(node)
@@ -203,7 +205,7 @@ impl Node {
     ///
     /// [`Error::Database`] if the change cannot be saved; nothing changes then.
     pub fn allow(&self, peer: PeerId) -> Result<(), Error> {
-        self.set_allowed(peer, true)
+        self.access.set_allowed(peer, true)
     }
 
     /// Stops `peer` from connecting again. A transfer already running is not cut.
@@ -212,27 +214,83 @@ impl Node {
     ///
     /// [`Error::Database`] if the change cannot be saved; nothing changes then.
     pub fn disallow(&self, peer: PeerId) -> Result<(), Error> {
-        self.set_allowed(peer, false)
+        self.access.set_allowed(peer, false)
     }
 
-    fn set_allowed(&self, peer: PeerId, allowed: bool) -> Result<(), Error> {
-        // Lock held across the save, so two calls cannot leave memory and disk disagreeing.
-        let mut list = self.allowed.write().expect("allow-list lock poisoned");
-        // Disk first: if saving fails, memory still matches what is saved.
-        self.db.set_allowed(peer, allowed)?;
-        if allowed {
-            list.insert(peer);
-        } else {
-            list.remove(&peer);
+    /// Creates a one-time invite code to send to someone, valid for 24 hours.
+    ///
+    /// Whoever redeems it first becomes a contact, and may then fetch from
+    /// this node. `my_name` is shown to them.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::InvalidInvite`] if `my_name` is not a valid name,
+    /// [`Error::Database`] if the invite cannot be saved.
+    // shortcut: a valid code is accepted without asking; add a prompt once there is a GUI to show it.
+    pub fn create_invite(&self, my_name: &str) -> Result<String, Error> {
+        let token = InviteToken::random();
+        let code = encode_invite(&Invite {
+            peer: self.peer_id(),
+            name: my_name.to_owned(),
+            token,
+        })
+        .map_err(Error::InvalidInvite)?;
+        self.access.db().add_invite(token, now_ms())?;
+        Ok(code)
+    }
+
+    /// Redeems an invite code from another device: both become contacts and
+    /// may fetch from each other. `my_name` is shown to them.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::InvalidInvite`] if the code or `my_name` is not valid,
+    /// [`Error::ContactRejected`] if the other device refused it (unknown,
+    /// already used or expired), [`Error::Control`] if it cannot be reached,
+    /// [`Error::Database`] if the contact cannot be saved.
+    pub async fn redeem_invite(&self, code: &str, my_name: &str) -> Result<Contact, Error> {
+        let invite = decode_invite(code).map_err(Error::InvalidInvite)?;
+        check_display_name(my_name).map_err(Error::InvalidInvite)?;
+        let request = control::ControlMsg::ContactRequest {
+            token: invite.token,
+            name: my_name.to_owned(),
+        };
+        match self.request(invite.peer, &request).await? {
+            control::ControlMsg::ContactAccepted => {
+                let contact = Contact {
+                    peer: invite.peer,
+                    name: invite.name,
+                    added_at: now_ms(),
+                };
+                // shortcut: if this save fails, the inviter has us as a contact but we lack them; redeeming again is refused then.
+                self.access.add_contact(&contact)?;
+                info!(peer = %contact.peer.short(), "contact added");
+                Ok(contact)
+            }
+            _ => Err(Error::ContactRejected),
         }
-        Ok(())
+    }
+
+    /// Every contact of this device.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Database`] if they cannot be read.
+    pub fn contacts(&self) -> Result<Vec<Contact>, Error> {
+        self.access.db().contacts()
+    }
+
+    /// Removes a contact; from then on they cannot fetch from this node.
+    /// They are not told. A transfer already running is not cut.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Database`] if the change cannot be saved; nothing changes then.
+    pub fn remove_contact(&self, peer: PeerId) -> Result<(), Error> {
+        self.access.remove_contact(peer)
     }
 
     /// Sends one control message to `peer` and waits for its answer.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "used by the contact flow (step C)")
-    )]
     async fn request(
         &self,
         peer: PeerId,
@@ -541,6 +599,7 @@ fn file_name(path: &Path) -> Result<String, Error> {
         .ok_or(Error::InvalidPath)
 }
 
+mod access;
 mod control;
 mod db;
 mod key;

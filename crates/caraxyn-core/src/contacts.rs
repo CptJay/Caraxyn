@@ -13,7 +13,10 @@
 //! assert_eq!(decode_invite(&code).unwrap(), invite);
 //! ```
 
-use std::fmt;
+use std::{
+    fmt,
+    time::{SystemTime, UNIX_EPOCH},
+};
 
 use data_encoding::BASE32_NOPAD;
 use serde::{Deserialize, Serialize};
@@ -40,6 +43,10 @@ impl InviteToken {
     pub fn random() -> Self {
         Self(rand::random())
     }
+
+    pub(crate) fn as_bytes(&self) -> &[u8; 16] {
+        &self.0
+    }
 }
 
 // Not derived: the token is a secret and must not end up in logs.
@@ -58,6 +65,17 @@ pub struct Invite {
     pub name: String,
     /// The one-time secret the invited device sends back.
     pub token: InviteToken,
+}
+
+/// Another device this one has added through an invite.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Contact {
+    /// The contact's device.
+    pub peer: PeerId,
+    /// The name they gave when the contact was made.
+    pub name: String,
+    /// When the contact was made, in unix milliseconds.
+    pub added_at: u64,
 }
 
 /// Why an invite code or token was rejected.
@@ -138,7 +156,16 @@ pub fn check_invite(issued_at: u64, used: bool, now: u64) -> Result<(), InviteEr
     }
 }
 
-fn check_name(name: &str) -> Result<(), InviteError> {
+/// The current time in unix milliseconds, as stored with invites and contacts.
+pub(crate) fn now_ms() -> u64 {
+    // A clock before 1970 counts as 0; nothing breaks, invites just expire early.
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
+}
+
+/// Checks a display name, from an invite code or from another node.
+pub(crate) fn check_name(name: &str) -> Result<(), InviteError> {
     let ok = !name.trim().is_empty()
         && name.chars().count() <= MAX_NAME_CHARS
         && !name.chars().any(char::is_control);
