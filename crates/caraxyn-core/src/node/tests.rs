@@ -13,6 +13,14 @@ struct TestNode {
 /// Starts an offline node (no discovery, no relay) that other test nodes can
 /// find through `lookup`.
 async fn offline_node(lookup: &MemoryLookup) -> TestNode {
+    node_with_gc(lookup, GC_INTERVAL).await
+}
+
+/// Garbage collection interval for tests that want to see it run.
+const FAST_GC: Duration = Duration::from_millis(50);
+
+/// Like [`offline_node`], with its own garbage collection interval.
+async fn node_with_gc(lookup: &MemoryLookup, gc_interval: Duration) -> TestNode {
     // Shows logs with: RUST_LOG=caraxyn_core=debug cargo test -- --nocapture
     let _ = tracing_subscriber::fmt()
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
@@ -23,6 +31,7 @@ async fn offline_node(lookup: &MemoryLookup) -> TestNode {
         NodeConfig::new(dir.path()),
         presets::Minimal,
         Some(lookup.clone()),
+        gc_interval,
     )
     .await
     .unwrap();
@@ -635,7 +644,14 @@ async fn a_saved_file_can_be_deleted_and_received_again() {
 #[tokio::test]
 async fn the_peer_id_survives_a_restart() {
     let dir = TempDir::new().unwrap();
-    let start = || Node::spawn_with(NodeConfig::new(dir.path()), presets::Minimal, None);
+    let start = || {
+        Node::spawn_with(
+            NodeConfig::new(dir.path()),
+            presets::Minimal,
+            None,
+            GC_INTERVAL,
+        )
+    };
 
     let first = start().await.unwrap();
     let id = first.peer_id();
@@ -649,11 +665,146 @@ async fn the_peer_id_survives_a_restart() {
 #[tokio::test]
 async fn a_second_node_cannot_use_the_same_data_dir() {
     let dir = TempDir::new().unwrap();
-    let start = || Node::spawn_with(NodeConfig::new(dir.path()), presets::Minimal, None);
+    let start = || {
+        Node::spawn_with(
+            NodeConfig::new(dir.path()),
+            presets::Minimal,
+            None,
+            GC_INTERVAL,
+        )
+    };
     let first = start().await.unwrap();
 
     let second = start().await;
 
     assert!(matches!(second, Err(Error::Store(_))), "got {second:?}");
     first.shutdown().await.unwrap();
+}
+
+/// Total size of all files under `dir`.
+fn disk_usage(dir: &Path) -> u64 {
+    std::fs::read_dir(dir)
+        .unwrap()
+        .map(|e| e.unwrap())
+        .map(|e| match e.file_type().unwrap().is_dir() {
+            true => disk_usage(&e.path()),
+            false => e.metadata().unwrap().len(),
+        })
+        .sum()
+}
+
+/// Waits until `done` holds, failing the test after 10 seconds.
+async fn wait_for(what: &str, done: impl Fn() -> bool) {
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while !done() {
+            tokio::time::sleep(FAST_GC).await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("timed out waiting until {what}"));
+}
+
+#[tokio::test]
+async fn a_received_share_is_kept_until_exported_then_freed() {
+    let lookup = MemoryLookup::new();
+    let a = offline_node(&lookup).await;
+    let b = node_with_gc(&lookup, FAST_GC).await;
+    let content = vec![5u8; 3 << 20];
+    let (_src, path) = write_file("big.bin", &content);
+    let root = a.node.share_file(&path).await.unwrap();
+    a.node.allow(b.node.peer_id());
+    b.node.fetch(a.node.peer_id(), root).await.unwrap();
+    let store_dir = b._dir.path().join("blobs");
+    let fetched = disk_usage(&store_dir);
+
+    // Several collection runs: the unexported share must survive them.
+    tokio::time::sleep(FAST_GC * 6).await;
+    let out = TempDir::new().unwrap();
+    b.node.export(root, out.path()).await.unwrap();
+    assert_eq!(std::fs::read(out.path().join("big.bin")).unwrap(), content);
+
+    wait_for("the store copy is freed", || {
+        disk_usage(&store_dir) + (3 << 20) <= fetched
+    })
+    .await;
+    a.node.shutdown().await.unwrap();
+    b.node.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn garbage_collection_keeps_our_shares_and_never_touches_shared_files() {
+    let lookup = MemoryLookup::new();
+    let a = node_with_gc(&lookup, FAST_GC).await;
+    let b = offline_node(&lookup).await;
+    // A big file is referenced in place, a small one is copied into the store.
+    let src = TempDir::new().unwrap();
+    let d = src.path().join("d");
+    std::fs::create_dir(&d).unwrap();
+    let big: Vec<u8> = (0..3 << 20).map(|i: u32| (i % 251) as u8).collect();
+    std::fs::write(d.join("big.bin"), &big).unwrap();
+    std::fs::write(d.join("small.txt"), b"small").unwrap();
+    let root = a.node.share_folder(&d).await.unwrap();
+
+    tokio::time::sleep(FAST_GC * 6).await;
+
+    assert_eq!(std::fs::read(d.join("big.bin")).unwrap(), big);
+    a.node.allow(b.node.peer_id());
+    b.node.fetch(a.node.peer_id(), root).await.unwrap();
+    assert_eq!(
+        read_share(&b.node, root).await,
+        vec![
+            ("d/big.bin".to_owned(), big),
+            ("d/small.txt".to_owned(), b"small".to_vec())
+        ]
+    );
+    a.node.shutdown().await.unwrap();
+    b.node.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn sharing_the_same_file_twice_leaves_one_tag() {
+    let a = offline_node(&MemoryLookup::new()).await;
+    let (_src, path) = write_file("a.txt", b"same");
+
+    a.node.share_file(&path).await.unwrap();
+    a.node.share_file(&path).await.unwrap();
+
+    assert_eq!(a.node.store.tags().delete_all().await.unwrap(), 1);
+    a.node.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn an_unexported_share_survives_a_restart_and_collection() {
+    let lookup = MemoryLookup::new();
+    let a = offline_node(&lookup).await;
+    let dir = TempDir::new().unwrap();
+    let start = || {
+        Node::spawn_with(
+            NodeConfig::new(dir.path()),
+            presets::Minimal,
+            Some(lookup.clone()),
+            FAST_GC,
+        )
+    };
+    let b = start().await.unwrap();
+    lookup.add_endpoint_info(b.router.endpoint().addr());
+    let (_src, path) = write_file("big.bin", &vec![6u8; 1 << 20]);
+    let root = a.node.share_file(&path).await.unwrap();
+    a.node.allow(b.peer_id());
+    b.fetch(a.node.peer_id(), root).await.unwrap();
+    b.shutdown().await.unwrap();
+    // The sender goes away: the share can only come from b's own store now.
+    a.node.shutdown().await.unwrap();
+
+    let b = start().await.unwrap();
+    tokio::time::sleep(FAST_GC * 6).await;
+    let out = TempDir::new().unwrap();
+
+    b.export(root, out.path()).await.unwrap();
+
+    assert_eq!(
+        std::fs::read(out.path().join("big.bin")).unwrap(),
+        vec![6u8; 1 << 20]
+    );
+    b.shutdown().await.unwrap();
 }

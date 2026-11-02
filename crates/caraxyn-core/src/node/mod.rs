@@ -7,6 +7,7 @@ use std::{
     collections::HashSet,
     path::{Path, PathBuf},
     sync::{Arc, RwLock},
+    time::Duration,
 };
 
 use iroh::{
@@ -24,7 +25,10 @@ use iroh_blobs::{
     },
     format::collection::Collection,
     provider::events::{AbortReason, ConnectMode, EventMask, EventSender, ProviderMessage},
-    store::fs::FsStore,
+    store::{
+        GcConfig,
+        fs::{FsStore, options::Options},
+    },
 };
 use tracing::{info, warn};
 
@@ -33,6 +37,19 @@ use crate::{
     ids::{ContentHash, PeerId},
     safe_name,
 };
+
+/// How often the blob store deletes data no tag protects.
+const GC_INTERVAL: Duration = Duration::from_secs(5 * 60);
+
+/// Tag that keeps one of our own shares (and every file in it) in the store.
+fn share_tag(root: ContentHash) -> String {
+    format!("share/{root}")
+}
+
+/// Tag that keeps a received share in the store until it has been exported.
+fn recv_tag(root: ContentHash) -> String {
+    format!("recv/{root}")
+}
 
 impl From<EndpointId> for PeerId {
     fn from(id: EndpointId) -> Self {
@@ -93,16 +110,26 @@ impl Node {
     /// [`Error::InvalidKeyFile`] if the key file is damaged, or [`Error::Io`]
     /// if it cannot be read or written.
     pub async fn spawn(config: NodeConfig) -> Result<Self, Error> {
-        Self::spawn_with(config, presets::N0, None).await
+        Self::spawn_with(config, presets::N0, None, GC_INTERVAL).await
     }
 
-    /// `lookup` is only used by tests, to let nodes find each other offline.
+    /// `lookup` and a short `gc_interval` are only used by tests: to let nodes
+    /// find each other offline, and to see garbage collection happen.
     async fn spawn_with(
         config: NodeConfig,
         preset: impl Preset,
         lookup: Option<MemoryLookup>,
+        gc_interval: Duration,
     ) -> Result<Self, Error> {
-        let store: Store = FsStore::load(config.data_dir.join("blobs"))
+        let blobs = config.data_dir.join("blobs");
+        let mut options = Options::new(&blobs);
+        // Deletes every blob no tag reaches. It never deletes a file shared in
+        // place: only the store's own copies and its record of the file.
+        options.gc = Some(GcConfig {
+            interval: gc_interval,
+            add_protected: None,
+        });
+        let store: Store = FsStore::load_with_opts(blobs.join("blobs.db"), options)
             .await
             .map_err(Error::store)?
             .into();
@@ -183,7 +210,9 @@ impl Node {
     /// Downloads a share from another node into our own store.
     ///
     /// Everything is verified against its hash while it streams in. Returns
-    /// once the whole collection is stored.
+    /// once the whole collection is stored. The share stays in the store,
+    /// across restarts too, until it is [exported](Self::export); a failed
+    /// download keeps what it verified so far, and a retry continues from there.
     ///
     /// # Errors
     ///
@@ -193,6 +222,13 @@ impl Node {
     // shortcut: iroh reports a refusal as a plain failed download, so it cannot be told apart yet; add Error::Refused if a caller needs it.
     pub async fn fetch(&self, from: PeerId, root: ContentHash) -> Result<(), Error> {
         let provider = EndpointId::from_bytes(from.as_ref()).map_err(|_| Error::InvalidPeerId)?;
+        // Before the download, so garbage collection cannot delete half of it.
+        // Kept if the download fails, so a retry resumes with the verified chunks.
+        self.store
+            .tags()
+            .set(recv_tag(root), HashAndFormat::hash_seq(root.into()))
+            .await
+            .map_err(Error::store)?;
         self.store
             .downloader(self.router.endpoint())
             .download(
@@ -291,13 +327,14 @@ impl Node {
             .store(&self.store)
             .await
             .map_err(Error::store)?;
-        // A tag keeps the collection from being garbage-collected.
+        let root_hash = root.hash().into();
+        // A named tag, so sharing the same thing again reuses it instead of adding one.
         self.store
             .tags()
-            .create(root.hash_and_format())
+            .set(share_tag(root_hash), root.hash_and_format())
             .await
             .map_err(Error::store)?;
-        Ok(root.hash().into())
+        Ok(root_hash)
     }
 
     /// Writes a share held in our store into the existing folder `dest`.
@@ -305,6 +342,10 @@ impl Node {
     /// Every name is checked, component by component, and nothing is
     /// overwritten. Folders are created as needed. If anything fails, `dest`
     /// is left as it was. Returns the paths written.
+    ///
+    /// After a successful export of a received share, its copy in the store is
+    /// freed at the next garbage collection; exporting it again needs a new
+    /// [`fetch`](Self::fetch).
     ///
     /// # Errors
     ///
@@ -379,12 +420,19 @@ impl Node {
             }
             written.push(path);
         }
+        // Saved, so the store copy may go. Not an error: the files are already written.
+        if let Err(e) = self.store.tags().delete(recv_tag(root)).await {
+            warn!(share = %root.short(), %e, "could not release the received share");
+        }
         info!(share = %root.short(), files = written.len(), "share exported");
         Ok(written)
     }
 
     /// Writes one blob to `path`, creating its parent folders.
-    // shortcut: copies, so a received file takes its disk space twice (store + dest) and nothing frees the store copy yet (GC is off); moving it out instead breaks re-fetching once the user deletes the file.
+    ///
+    /// Copies rather than moves: moving would leave the store pointing at a
+    /// file the user may later delete. The store copy is freed by garbage
+    /// collection once the share's `recv/` tag is gone.
     async fn export_one(&self, hash: Hash, path: &Path) -> Result<(), Error> {
         if let Some(parent) = path.parent() {
             tokio::fs::create_dir_all(parent)
