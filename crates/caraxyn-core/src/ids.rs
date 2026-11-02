@@ -22,12 +22,7 @@ pub enum ParseIdError {
 }
 
 fn parse_id(s: &str) -> Result<[u8; ID_LEN], ParseIdError> {
-    // Helper to avoid repeating the length check in the error message.
-    fn is_correct_length(s: &str) -> bool {
-        s.len() == ID_LEN * 2
-    }
-
-    if !is_correct_length(s) {
+    if s.len() != ID_LEN * 2 {
         return Err(ParseIdError::InvalidLength(s.len()));
     }
     let mut bytes = [0; ID_LEN];
