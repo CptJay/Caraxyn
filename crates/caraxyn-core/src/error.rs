@@ -22,13 +22,15 @@ pub enum Error {
     #[error("blob store error: {0}")]
     Store(String),
     /// A filesystem operation failed (for example the shared file does not exist).
-    #[error("io error at {}", path.display())]
+    // The reason goes in the message, not as the error's source, so it shows
+    // once both in a GUI and in chained output (a field named `source` would
+    // become the source automatically).
+    #[error("io error at {}: {reason}", path.display())]
     Io {
         /// The file or folder the operation was about.
         path: PathBuf,
         /// What the operating system reported.
-        #[source]
-        source: std::io::Error,
+        reason: std::io::Error,
     },
     /// The path has no file name that can be shared (or it is not valid UTF-8).
     #[error("path has no usable UTF-8 file name")]
@@ -42,7 +44,6 @@ pub enum Error {
         /// The name the sender chose.
         name: String,
         /// Why it was rejected.
-        #[source]
         reason: NameError,
     },
     /// The secret key file exists but does not hold a key. It is left as it is.
@@ -62,6 +63,26 @@ impl Error {
     /// For `map_err`: wraps an io error together with the path it happened at.
     pub(crate) fn io(path: &std::path::Path) -> impl FnOnce(std::io::Error) -> Self {
         let path = path.to_owned();
-        move |source| Self::Io { path, source }
+        move |reason| Self::Io { path, reason }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{error::Error as _, io::ErrorKind, path::Path};
+
+    use super::*;
+
+    #[test]
+    fn the_reason_is_in_the_message_not_the_source() {
+        let io = Error::io(Path::new("/x"))(ErrorKind::PermissionDenied.into());
+        assert!(io.to_string().contains("permission denied"), "{io}");
+        let name = Error::UnsafeName {
+            name: "x.".to_owned(),
+            reason: NameError::TrailingDotOrSpace,
+        };
+        for e in [io, name] {
+            assert!(e.source().is_none(), "{e}");
+        }
     }
 }
