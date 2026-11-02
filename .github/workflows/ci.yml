@@ -1,8 +1,10 @@
 name: CI
 
 on:
-  push:
   pull_request:
+  # Only main: branch pushes are covered by their PR. Also seeds the cache PRs can reuse.
+  push:
+    branches: [main]
 
 jobs:
   check:
