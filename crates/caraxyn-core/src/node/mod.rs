@@ -19,7 +19,7 @@ use iroh_blobs::{
     BlobFormat, BlobsProtocol, Hash, HashAndFormat,
     api::{
         Store,
-        blobs::{AddPathOptions, ExportMode, ExportOptions, ImportMode},
+        blobs::{AddPathOptions, ImportMode},
         downloader::Shuffled,
     },
     format::collection::Collection,
@@ -384,29 +384,18 @@ impl Node {
     }
 
     /// Writes one blob to `path`, creating its parent folders.
-    ///
-    /// A blob the store owns is moved out rather than copied, so a received
-    /// file does not take its disk space twice; the store then points at
-    /// `path`.
+    // shortcut: copies, so a received file takes its disk space twice (store + dest) until GC frees the store copy; moving it out instead breaks re-fetching once the user deletes the file.
     async fn export_one(&self, hash: Hash, path: &Path) -> Result<(), Error> {
         if let Some(parent) = path.parent() {
             tokio::fs::create_dir_all(parent)
                 .await
                 .map_err(Error::io(parent))?;
         }
-        let export = |mode| {
-            self.store.blobs().export_with_opts(ExportOptions {
-                hash,
-                mode,
-                target: path.to_owned(),
-            })
-        };
-        // iroh falls back to copying only for Linux's cross-drive error, not
-        // for Windows' (store on C:, target on D:), so retry as a copy.
-        if let Err(e) = export(ExportMode::TryReference).await {
-            warn!(path = %path.display(), %e, "move out of the store failed, copying");
-            export(ExportMode::Copy).await.map_err(Error::store)?;
-        }
+        self.store
+            .blobs()
+            .export(hash, path)
+            .await
+            .map_err(Error::store)?;
         Ok(())
     }
 
