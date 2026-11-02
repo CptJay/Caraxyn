@@ -3,7 +3,7 @@
 //! Every request opens its own QUIC stream: one message each way. The end of
 //! the stream marks the end of the message, so no length prefix is needed.
 
-use std::time::Duration;
+use std::{sync::Arc, time::Duration};
 
 use iroh::{
     endpoint::{Connection, ReadToEndError, RecvStream, SendStream, VarInt},
@@ -11,9 +11,13 @@ use iroh::{
 };
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
-use tracing::debug;
+use tracing::{debug, warn};
 
-use crate::{contacts::InviteToken, ids::PeerId};
+use super::access::Access;
+use crate::{
+    contacts::{Contact, InviteToken, check_name, now_ms},
+    ids::PeerId,
+};
 
 /// Protocol name sent when connecting. The `1` is the version: an incompatible
 /// change gets a new name, so old and new versions can run side by side.
@@ -38,8 +42,8 @@ const REFUSED: VarInt = VarInt::from_u32(1);
 pub(crate) enum ControlMsg {
     /// "You invited me": the token from the invite and the sender's name.
     ContactRequest { token: InviteToken, name: String },
-    /// The invite was accepted; the name of the one who accepted.
-    ContactAccepted { name: String },
+    /// The invite was accepted. The inviter's name is already in the code.
+    ContactAccepted,
     /// The invite was refused, unknown, used or expired.
     ContactRejected,
 }
@@ -87,17 +91,21 @@ pub(crate) async fn recv(stream: &mut RecvStream) -> Result<ControlMsg, ControlE
 /// Answers control requests from other nodes, strangers included: someone
 /// redeeming an invite is not a contact yet. Each message is checked instead.
 #[derive(Clone, Debug)]
-pub(crate) struct ControlHandler;
+pub(crate) struct ControlHandler {
+    pub(super) access: Arc<Access>,
+}
 
 impl ProtocolHandler for ControlHandler {
     async fn accept(&self, conn: Connection) -> Result<(), AcceptError> {
+        // Proven by the connection's encryption, so it cannot be faked.
         let peer = PeerId::from(conn.remote_id());
         // One stream per request, until the other side closes the connection.
         while let Ok((mut tx, mut rx)) = conn.accept_bi().await {
+            let access = Arc::clone(&self.access);
             // Own task per request, so one slow stream does not hold up the others.
             tokio::spawn(async move {
                 let answer = match recv(&mut rx).await {
-                    Ok(msg) => answer(msg),
+                    Ok(msg) => answer(&access, peer, msg),
                     Err(e) => {
                         debug!(peer = %peer.short(), %e, "bad control message");
                         None
@@ -118,13 +126,32 @@ impl ProtocolHandler for ControlHandler {
     }
 }
 
-/// The answer to a request, or `None` to refuse it.
-fn answer(msg: ControlMsg) -> Option<ControlMsg> {
+/// The answer to a request from `peer`, or `None` to refuse it.
+fn answer(access: &Access, peer: PeerId, msg: ControlMsg) -> Option<ControlMsg> {
     match msg {
-        // shortcut: no invites are stored yet, so every request is refused; the contact flow (step C) decides here.
-        ControlMsg::ContactRequest { .. } => Some(ControlMsg::ContactRejected),
+        ControlMsg::ContactRequest { token, name } => {
+            // Never says why: a stranger must not learn which tokens exist.
+            let accepted = check_name(&name).is_ok() && {
+                let contact = Contact {
+                    peer,
+                    name,
+                    added_at: now_ms(),
+                };
+                access
+                    .redeem(token, &contact, contact.added_at)
+                    .unwrap_or_else(|e| {
+                        warn!(peer = %peer.short(), %e, "could not check an invite");
+                        false
+                    })
+            };
+            Some(if accepted {
+                ControlMsg::ContactAccepted
+            } else {
+                ControlMsg::ContactRejected
+            })
+        }
         // Answers are never valid requests.
-        ControlMsg::ContactAccepted { .. } | ControlMsg::ContactRejected => None,
+        ControlMsg::ContactAccepted | ControlMsg::ContactRejected => None,
     }
 }
 
@@ -139,7 +166,7 @@ mod tests {
                 token: InviteToken::random(),
                 name: "Jay".into(),
             },
-            ControlMsg::ContactAccepted { name: "Sam".into() },
+            ControlMsg::ContactAccepted,
             ControlMsg::ContactRejected,
         ] {
             let bytes = postcard::to_allocvec(&msg).unwrap();

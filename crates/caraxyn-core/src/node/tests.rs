@@ -963,3 +963,163 @@ async fn bad_control_messages_fail_only_their_own_stream() {
     a.node.shutdown().await.unwrap();
     b.node.shutdown().await.unwrap();
 }
+
+/// Whether `from` can fetch `root` from `to` (a refusal is `false`).
+async fn can_fetch(from: &Node, to: &Node, root: ContentHash) -> bool {
+    let result =
+        tokio::time::timeout(Duration::from_secs(20), from.fetch(to.peer_id(), root)).await;
+    matches!(result, Ok(Ok(())))
+}
+
+#[tokio::test]
+async fn an_invite_makes_two_devices_mutual_contacts() {
+    let lookup = MemoryLookup::new();
+    let (a, b) = (offline_node(&lookup).await, offline_node(&lookup).await);
+    let (_sa, pa) = write_file("from-a.txt", b"a");
+    let (_sb, pb) = write_file("from-b.txt", b"b");
+    let (root_a, root_b) = (
+        a.node.share_file(&pa).await.unwrap(),
+        b.node.share_file(&pb).await.unwrap(),
+    );
+
+    let code = a.node.create_invite("Alice").unwrap();
+    let alice = b.node.redeem_invite(&code, "Bob").await.unwrap();
+
+    assert_eq!(
+        (alice.peer, alice.name.as_str()),
+        (a.node.peer_id(), "Alice")
+    );
+    let a_contacts = a.node.contacts().unwrap();
+    assert_eq!(a_contacts.len(), 1);
+    assert_eq!(
+        (a_contacts[0].peer, a_contacts[0].name.as_str()),
+        (b.node.peer_id(), "Bob")
+    );
+    assert_eq!(b.node.contacts().unwrap(), vec![alice]);
+    assert!(can_fetch(&b.node, &a.node, root_a).await);
+    assert!(can_fetch(&a.node, &b.node, root_b).await);
+    a.node.shutdown().await.unwrap();
+    b.node.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn an_invite_works_only_once() {
+    let lookup = MemoryLookup::new();
+    let (a, b, c) = (
+        offline_node(&lookup).await,
+        offline_node(&lookup).await,
+        offline_node(&lookup).await,
+    );
+    let (_src, path) = write_file("x.txt", b"x");
+    let root = a.node.share_file(&path).await.unwrap();
+    let code = a.node.create_invite("Alice").unwrap();
+    b.node.redeem_invite(&code, "Bob").await.unwrap();
+
+    let second = c.node.redeem_invite(&code, "Carol").await;
+
+    assert!(
+        matches!(second, Err(Error::ContactRejected)),
+        "got {second:?}"
+    );
+    assert!(c.node.contacts().unwrap().is_empty());
+    assert_eq!(a.node.contacts().unwrap().len(), 1);
+    assert!(!can_fetch(&c.node, &a.node, root).await);
+    for n in [a, b, c] {
+        n.node.shutdown().await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn a_forged_invite_is_rejected() {
+    let lookup = MemoryLookup::new();
+    let (a, b) = (offline_node(&lookup).await, offline_node(&lookup).await);
+    // A's real id and a name, but a token A never issued.
+    let forged = crate::contacts::encode_invite(&Invite {
+        peer: a.node.peer_id(),
+        name: "Alice".into(),
+        token: InviteToken::random(),
+    })
+    .unwrap();
+
+    let result = b.node.redeem_invite(&forged, "Bob").await;
+
+    assert!(
+        matches!(result, Err(Error::ContactRejected)),
+        "got {result:?}"
+    );
+    assert!(a.node.contacts().unwrap().is_empty());
+    a.node.shutdown().await.unwrap();
+    b.node.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn a_hostile_name_is_rejected_and_the_token_stays_unused() {
+    let lookup = MemoryLookup::new();
+    let (a, b) = (offline_node(&lookup).await, offline_node(&lookup).await);
+    let code = a.node.create_invite("Alice").unwrap();
+    let token = crate::contacts::decode_invite(&code).unwrap().token;
+    // Sent by hand: our own redeem_invite would refuse this name before sending.
+    let hostile = control::ControlMsg::ContactRequest {
+        token,
+        name: "Bob\u{1b}[31m".into(),
+    };
+
+    let answer = b.node.request(a.node.peer_id(), &hostile).await.unwrap();
+
+    assert_eq!(answer, control::ControlMsg::ContactRejected);
+    assert!(a.node.contacts().unwrap().is_empty());
+    // A bad request does not use up the invite.
+    b.node.redeem_invite(&code, "Bob").await.unwrap();
+    a.node.shutdown().await.unwrap();
+    b.node.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn contacts_survive_a_restart_and_removal_refuses_them() {
+    let lookup = MemoryLookup::new();
+    let dir = TempDir::new().unwrap();
+    let a = node_in(dir.path(), &lookup).await;
+    let b = offline_node(&lookup).await;
+    let (_src, path) = write_file("x.txt", b"x");
+    let root = a.share_file(&path).await.unwrap();
+    let code = a.create_invite("Alice").unwrap();
+    b.node.redeem_invite(&code, "Bob").await.unwrap();
+    a.shutdown().await.unwrap();
+
+    let a = node_in(dir.path(), &lookup).await;
+    assert_eq!(a.contacts().unwrap().len(), 1);
+    assert!(can_fetch(&b.node, &a, root).await);
+
+    a.remove_contact(b.node.peer_id()).unwrap();
+
+    assert!(a.contacts().unwrap().is_empty());
+    let (_src2, path2) = write_file("y.txt", b"y");
+    let root2 = a.share_file(&path2).await.unwrap();
+    assert!(!can_fetch(&b.node, &a, root2).await);
+    a.shutdown().await.unwrap();
+    b.node.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn bad_codes_and_names_fail_before_any_network() {
+    let a = offline_node(&MemoryLookup::new()).await;
+
+    let bad_code = a.node.redeem_invite("hello", "Bob").await;
+    let bad_own_name = a.node.create_invite("");
+    let code = a.node.create_invite("Alice").unwrap();
+    let bad_redeem_name = a.node.redeem_invite(&code, "\u{7}").await;
+
+    assert!(
+        matches!(bad_code, Err(Error::InvalidInvite(_))),
+        "got {bad_code:?}"
+    );
+    assert!(
+        matches!(bad_own_name, Err(Error::InvalidInvite(_))),
+        "got {bad_own_name:?}"
+    );
+    assert!(
+        matches!(bad_redeem_name, Err(Error::InvalidInvite(_))),
+        "got {bad_redeem_name:?}"
+    );
+    a.node.shutdown().await.unwrap();
+}
