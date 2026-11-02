@@ -288,6 +288,7 @@ dependencies = [
  "hex",
  "iroh",
  "iroh-blobs",
+ "n0-future",
  "postcard",
  "rand",
  "redb",

@@ -1138,3 +1138,196 @@ async fn bad_codes_and_names_fail_before_any_network() {
     );
     a.node.shutdown().await.unwrap();
 }
+
+/// A raw blobs connection from `from` to `to`, for sending hand-made requests.
+async fn blob_conn(from: &Node, to: &Node) -> iroh::endpoint::Connection {
+    from.router
+        .endpoint()
+        .connect(to.router.endpoint().id(), iroh_blobs::ALPN)
+        .await
+        .unwrap()
+}
+
+/// The hash of the single file inside a one-file share.
+async fn file_hash(node: &Node, root: ContentHash) -> Hash {
+    let collection = Collection::load(root.into(), &node.store).await.unwrap();
+    let (_, hash) = collection.iter().next().unwrap();
+    *hash
+}
+
+/// A shares `x.txt` with B only and `y.txt` with C only; all three are connected.
+async fn two_shares() -> (TestNode, TestNode, TestNode, ContentHash, ContentHash) {
+    let lookup = MemoryLookup::new();
+    let (a, b, c) = (
+        offline_node(&lookup).await,
+        offline_node(&lookup).await,
+        offline_node(&lookup).await,
+    );
+    a.node.allow(b.node.peer_id()).unwrap();
+    a.node.allow(c.node.peer_id()).unwrap();
+    let (_sx, px) = write_file("x.txt", b"for b");
+    let (_sy, py) = write_file("y.txt", b"for c");
+    let x = a.node.share_file(&px, &[b.node.peer_id()]).await.unwrap();
+    let y = a.node.share_file(&py, &[c.node.peer_id()]).await.unwrap();
+    (a, b, c, x, y)
+}
+
+#[tokio::test]
+async fn each_recipient_gets_only_their_share() {
+    let (a, b, c, x, y) = two_shares().await;
+
+    assert!(can_fetch(&b.node, &a.node, x).await);
+    assert!(!can_fetch(&b.node, &a.node, y).await);
+    assert!(can_fetch(&c.node, &a.node, y).await);
+    assert!(!can_fetch(&c.node, &a.node, x).await);
+    for n in [a, b, c] {
+        n.node.shutdown().await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn a_file_is_only_served_to_recipients_of_its_share() {
+    let (a, b, c, x, y) = two_shares().await;
+    let (file_x, file_y) = (file_hash(&a.node, x).await, file_hash(&a.node, y).await);
+    let conn = blob_conn(&b.node, &a.node).await;
+    let get = |hash| {
+        let request = iroh_blobs::protocol::GetRequest::blob(hash);
+        b.node.store.remote().execute_get(conn.clone(), request)
+    };
+
+    let own_file = get(file_x).await;
+    let other_file = get(file_y).await;
+
+    assert!(own_file.is_ok(), "got {own_file:?}");
+    assert!(other_file.is_err(), "got {other_file:?}");
+    for n in [a, b, c] {
+        n.node.shutdown().await.unwrap();
+    }
+}
+
+/// The attack the "lists only on a root" rule stops: a file shared with B whose
+/// bytes happen to be the hash of C's file. Read as a list of hashes, it would
+/// make A serve C's file to B.
+#[tokio::test]
+async fn a_file_is_never_read_as_a_list() {
+    let (a, b, c, _, y) = two_shares().await;
+    let file_y = file_hash(&a.node, y).await;
+    let (_src, path) = write_file("innocent.bin", file_y.as_bytes());
+    let x = a.node.share_file(&path, &[b.node.peer_id()]).await.unwrap();
+    let file_x = file_hash(&a.node, x).await;
+    let conn = blob_conn(&b.node, &a.node).await;
+
+    let as_list = b
+        .node
+        .store
+        .remote()
+        .execute_get(conn, iroh_blobs::protocol::GetRequest::all(file_x))
+        .await;
+
+    assert!(as_list.is_err(), "got {as_list:?}");
+    assert!(
+        !b.node.store.blobs().has(file_y).await.unwrap(),
+        "C's file reached B"
+    );
+    for n in [a, b, c] {
+        n.node.shutdown().await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn batch_requests_are_refused() {
+    let (a, b, c, x, _) = two_shares().await;
+    let file_x = file_hash(&a.node, x).await;
+    let conn = blob_conn(&b.node, &a.node).await;
+
+    let batch = b
+        .node
+        .store
+        .remote()
+        .execute_get_many(
+            conn,
+            iroh_blobs::protocol::GetManyRequest::from_iter([file_x]),
+        )
+        .await;
+
+    assert!(batch.is_err(), "got {batch:?}");
+    for n in [a, b, c] {
+        n.node.shutdown().await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn asking_what_we_have_follows_the_same_rule() {
+    use n0_future::StreamExt;
+    let (a, b, c, x, y) = two_shares().await;
+    let (file_x, file_y) = (file_hash(&a.node, x).await, file_hash(&a.node, y).await);
+    let conn = blob_conn(&b.node, &a.node).await;
+    let observe = |hash| {
+        let request = iroh_blobs::protocol::ObserveRequest {
+            hash,
+            ranges: iroh_blobs::protocol::RangeSpec::all(),
+        };
+        b.node.store.remote().observe(conn.clone(), request)
+    };
+
+    let own = Box::pin(observe(file_x)).next().await;
+    let other = Box::pin(observe(file_y)).next().await;
+
+    assert!(matches!(own, Some(Ok(_))), "got {own:?}");
+    assert!(!matches!(other, Some(Ok(_))), "got {other:?}");
+    for n in [a, b, c] {
+        n.node.shutdown().await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn sharing_again_adds_a_recipient() {
+    let (a, b, c, x, _) = two_shares().await;
+    assert!(!can_fetch(&c.node, &a.node, x).await);
+    let collection = Collection::load(x.into(), &a.node.store).await.unwrap();
+    assert_eq!(collection.len(), 1);
+    let (_src, path) = write_file("x.txt", b"for b");
+
+    let again = a.node.share_file(&path, &[c.node.peer_id()]).await.unwrap();
+
+    assert_eq!(again, x);
+    assert!(can_fetch(&c.node, &a.node, x).await);
+    assert!(can_fetch(&b.node, &a.node, x).await);
+    for n in [a, b, c] {
+        n.node.shutdown().await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn shares_and_their_recipients_survive_a_restart() {
+    let lookup = MemoryLookup::new();
+    let dir = TempDir::new().unwrap();
+    let (b, c) = (offline_node(&lookup).await, offline_node(&lookup).await);
+    let a = node_in(dir.path(), &lookup).await;
+    a.allow(b.node.peer_id()).unwrap();
+    a.allow(c.node.peer_id()).unwrap();
+    let (_src, path) = write_file("x.txt", b"for b");
+    let root = a.share_file(&path, &[b.node.peer_id()]).await.unwrap();
+    a.shutdown().await.unwrap();
+
+    let a = node_in(dir.path(), &lookup).await;
+
+    assert!(can_fetch(&b.node, &a, root).await);
+    assert!(!can_fetch(&c.node, &a, root).await);
+    a.shutdown().await.unwrap();
+    b.node.shutdown().await.unwrap();
+    c.node.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn received_content_is_not_passed_on() {
+    let (a, b, c, x, _) = two_shares().await;
+    b.node.fetch(a.node.peer_id(), x).await.unwrap();
+    // C may connect to B, but B never shared x with anyone.
+    b.node.allow(c.node.peer_id()).unwrap();
+
+    assert!(!can_fetch(&c.node, &b.node, x).await);
+    for n in [a, b, c] {
+        n.node.shutdown().await.unwrap();
+    }
+}
