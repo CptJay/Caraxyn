@@ -9,9 +9,10 @@ use thiserror::Error;
 const MAX_LEN: usize = 255;
 
 /// Names Windows refuses (with or without an extension), compared lowercase.
-const RESERVED: [&str; 22] = [
-    "con", "prn", "aux", "nul", "com1", "com2", "com3", "com4", "com5", "com6", "com7", "com8",
-    "com9", "lpt1", "lpt2", "lpt3", "lpt4", "lpt5", "lpt6", "lpt7", "lpt8", "lpt9",
+const RESERVED: &[&str] = &[
+    "con", "prn", "aux", "nul", "conin$", "conout$", "com0", "com1", "com2", "com3", "com4",
+    "com5", "com6", "com7", "com8", "com9", "com¹", "com²", "com³", "lpt0", "lpt1", "lpt2", "lpt3",
+    "lpt4", "lpt5", "lpt6", "lpt7", "lpt8", "lpt9", "lpt¹", "lpt²", "lpt³",
 ];
 
 /// Why a file name was rejected.
@@ -97,6 +98,16 @@ mod tests {
         assert_eq!(check("a:b"), Err(NameError::InvalidChar(':')));
         assert_eq!(check("CON"), Err(NameError::Reserved));
         assert_eq!(check("nul.txt"), Err(NameError::Reserved));
+        for name in [
+            "CONIN$",
+            "conout$.log",
+            "COM0",
+            "lpt0.txt",
+            "COM¹",
+            "lpt³.txt",
+        ] {
+            assert_eq!(check(name), Err(NameError::Reserved), "{name}");
+        }
         assert_eq!(check("x."), Err(NameError::TrailingDotOrSpace));
         assert_eq!(check("x "), Err(NameError::TrailingDotOrSpace));
         assert_eq!(check(&"a".repeat(256)), Err(NameError::TooLong(256)));
