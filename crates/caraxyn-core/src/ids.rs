@@ -34,7 +34,8 @@ fn parse_id(s: &str) -> Result<[u8; ID_LEN], ParseIdError> {
 macro_rules! hex_id {
     ($(#[$meta:meta])* $name:ident) => {
         $(#[$meta])*
-        #[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+        // Serialized as its 32 bytes (compact), not as hex text.
+        #[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
         pub struct $name([u8; ID_LEN]);
 
         impl $name {
