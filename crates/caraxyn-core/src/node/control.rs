@@ -11,13 +11,14 @@ use iroh::{
 };
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
-use tokio::sync::Notify;
-use tracing::{debug, warn};
+use tokio::sync::{Notify, broadcast};
+use tracing::debug;
 
 use super::access::Access;
 use crate::{
     contacts::{Contact, InviteToken, check_name, now_ms},
     error::Error,
+    events::{Event, tell, warn_about},
     ids::{ContentHash, PeerId},
     safe_name,
     shares::{Offer, OfferState, PREVIEW_LEN},
@@ -123,6 +124,7 @@ pub(crate) struct ControlHandler {
     pub(super) access: Arc<Access>,
     /// Woken when a peer with offers waiting for it shows up.
     pub(super) postman: Arc<Notify>,
+    pub(super) events: broadcast::Sender<Event>,
 }
 
 impl ProtocolHandler for ControlHandler {
@@ -133,15 +135,15 @@ impl ProtocolHandler for ControlHandler {
         match self.access.db().offer_due_now(peer) {
             Ok(true) => self.postman.notify_one(),
             Ok(false) => {}
-            Err(e) => warn!(peer = %peer.short(), %e, "could not check the outbox"),
+            Err(e) => warn_about(&self.events, "checking the outbox for a peer", e),
         }
         // One stream per request, until the other side closes the connection.
         while let Ok((mut tx, mut rx)) = conn.accept_bi().await {
-            let access = Arc::clone(&self.access);
+            let (access, events) = (Arc::clone(&self.access), self.events.clone());
             // Own task per request, so one slow stream does not hold up the others.
             tokio::spawn(async move {
                 let answer = match recv(&mut rx).await {
-                    Ok(msg) => answer(&access, peer, msg),
+                    Ok(msg) => answer(&access, &events, peer, msg),
                     Err(e) => {
                         debug!(peer = %peer.short(), %e, "bad control message");
                         Err(REFUSED)
@@ -163,28 +165,34 @@ impl ProtocolHandler for ControlHandler {
 }
 
 /// The answer to a request from `peer`, or the code to cancel its stream with.
-fn answer(access: &Access, peer: PeerId, msg: ControlMsg) -> Result<ControlMsg, VarInt> {
+fn answer(
+    access: &Access,
+    events: &broadcast::Sender<Event>,
+    peer: PeerId,
+    msg: ControlMsg,
+) -> Result<ControlMsg, VarInt> {
     match msg {
         ControlMsg::ContactRequest { token, name } => {
             // Never says why: a stranger must not learn which tokens exist.
-            let accepted = check_name(&name).is_ok() && {
-                let contact = Contact {
-                    peer,
-                    name,
-                    added_at: now_ms(),
-                };
-                access
-                    .redeem(token, &contact, contact.added_at)
-                    .unwrap_or_else(|e| {
-                        warn!(peer = %peer.short(), %e, "could not check an invite");
-                        false
-                    })
+            if check_name(&name).is_err() {
+                return Ok(ControlMsg::ContactRejected);
+            }
+            let contact = Contact {
+                peer,
+                name,
+                added_at: now_ms(),
             };
-            Ok(if accepted {
-                ControlMsg::ContactAccepted
-            } else {
-                ControlMsg::ContactRejected
-            })
+            match access.redeem(token, &contact, contact.added_at) {
+                Ok(true) => {
+                    tell(events, Event::ContactAdded { contact });
+                    Ok(ControlMsg::ContactAccepted)
+                }
+                Ok(false) => Ok(ControlMsg::ContactRejected),
+                Err(e) => {
+                    warn_about(events, "checking an invite", e);
+                    Ok(ControlMsg::ContactRejected)
+                }
+            }
         }
         ControlMsg::ShareOffer {
             root,
@@ -207,27 +215,31 @@ fn answer(access: &Access, peer: PeerId, msg: ControlMsg) -> Result<ControlMsg, 
             };
             // Our own trouble is not a refusal: the sender keeps the offer and retries.
             let try_later = |e: Error| {
-                warn!(peer = %peer.short(), %e, "could not take an offer");
+                warn_about(events, "taking an offer", e);
                 TRY_LATER
             };
             // Only contacts may offer, so strangers cannot fill the inbox.
             if !offer_is_valid(&offer) || !access.db().is_contact(peer).map_err(try_later)? {
                 return Err(REFUSED);
             }
-            access.db().receive_offer(&offer).map_err(try_later)?;
+            let offer = access.db().receive_offer(&offer).map_err(try_later)?;
+            tell(events, Event::OfferReceived { offer });
             Ok(ControlMsg::OfferReceived)
         }
-        // Answers are never valid requests.
         // Looked up under the sender's own id, so nobody can revoke someone else's offer.
         ControlMsg::Revoke { root } => match access.db().revoke_offer(peer, root) {
-            Ok(true) => Ok(ControlMsg::Ack),
+            Ok(true) => {
+                tell(events, Event::OfferRevoked { from: peer, root });
+                Ok(ControlMsg::Ack)
+            }
             // Never offered by them (or never reached us): nothing to withdraw.
             Ok(false) => Err(REFUSED),
             Err(e) => {
-                warn!(peer = %peer.short(), %e, "could not mark an offer revoked");
+                warn_about(events, "marking an offer revoked", e);
                 Err(TRY_LATER)
             }
         },
+        // Answers are never valid requests.
         ControlMsg::ContactAccepted
         | ControlMsg::ContactRejected
         | ControlMsg::OfferReceived

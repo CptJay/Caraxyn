@@ -492,10 +492,10 @@ impl Db {
     /// details (title, expiry…) but keeps its state, so offering a declined
     /// share again does not bring it back. Only a revoked one becomes new
     /// again: the sender shared it once more.
-    pub(super) fn receive_offer(&self, offer: &Offer) -> Result<(), Error> {
+    pub(super) fn receive_offer(&self, offer: &Offer) -> Result<Offer, Error> {
         let key = pair_key(offer.from, offer.root);
         let tx = self.0.begin_write().map_err(Error::database)?;
-        {
+        let saved = {
             let mut table = tx.open_table(INBOX).map_err(Error::database)?;
             let old: Option<Offer> = table
                 .get(&key)
@@ -515,8 +515,10 @@ impl Db {
             table
                 .insert(&key, bytes.as_slice())
                 .map_err(Error::database)?;
-        }
-        tx.commit().map_err(Error::database)
+            offer
+        };
+        tx.commit().map_err(Error::database)?;
+        Ok(saved)
     }
 
     /// Marks an offer from `from` revoked, unless it was already saved.

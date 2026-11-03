@@ -21,6 +21,7 @@ use super::{
 use crate::{
     contacts::now_ms,
     error::Error,
+    events::{Event, tell, warn_about},
     ids::{ContentHash, PeerId},
     shares::PendingOffer,
 };
@@ -76,7 +77,7 @@ impl Node {
         let mut everything = true;
         loop {
             let wait = self.send_due(everything, &in_flight).unwrap_or_else(|e| {
-                warn!(%e, "could not read the outbox");
+                warn_about(&self.events, "reading the outbox", e);
                 self.timing.retry_max
             });
             everything = false;
@@ -116,7 +117,7 @@ impl Node {
             tokio::spawn(async move {
                 let delivery = node.deliver(entry).await;
                 if let Err(e) = node.record(entry, delivery) {
-                    warn!(%e, "could not update the outbox");
+                    warn_about(&node.events, "updating the outbox", e);
                 }
                 in_flight.lock().expect("outbox lock poisoned").remove(&key);
                 // The postman recomputes when the next offer is due.
@@ -131,14 +132,19 @@ impl Node {
     /// Updates the outbox after one attempt.
     fn record(&self, entry: OutboxEntry, delivery: Delivery) -> Result<(), Error> {
         let (to, root, mail) = (entry.to, entry.root, entry.mail);
+        let revoke = mail == Mail::Revoke;
         match delivery {
             Delivery::Delivered => {
                 info!(to = %to.short(), share = %root.short(), ?mail, "delivered");
-                self.access.db().remove_mail(to, root, mail)
+                self.access.db().remove_mail(to, root, mail)?;
+                tell(&self.events, Event::Delivered { to, root, revoke });
+                Ok(())
             }
             Delivery::Dropped => {
                 warn!(to = %to.short(), share = %root.short(), ?mail, "refused, not retrying");
-                self.access.db().remove_mail(to, root, mail)
+                self.access.db().remove_mail(to, root, mail)?;
+                tell(&self.events, Event::Undeliverable { to, root, revoke });
+                Ok(())
             }
             Delivery::Failed => {
                 let attempts = entry.attempts.saturating_add(1);
