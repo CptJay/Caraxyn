@@ -43,7 +43,11 @@ use crate::{
     error::Error,
     ids::{ContentHash, PeerId},
     safe_name,
+    shares::{Offer, OfferState, PREVIEW_LEN, Shared},
 };
+
+/// How long one recipient may take to accept an offer before it counts as undelivered.
+const OFFER_TIMEOUT: Duration = Duration::from_secs(15);
 
 /// How often the blob store deletes data no tag protects.
 const GC_INTERVAL: Duration = Duration::from_secs(5 * 60);
@@ -357,7 +361,10 @@ impl Node {
         Ok(())
     }
 
-    /// Imports a file and shares it with `recipients`; returns the share's hash.
+    /// Imports a file, shares it with `recipients` and offers it to them.
+    ///
+    /// Returns the share's hash and the recipients the offer could not reach
+    /// right now; the share is saved either way.
     ///
     /// Only recipients may fetch it, and only if they may connect at all (a
     /// contact, or [allowed](Self::allow)). Sharing the same content again adds
@@ -372,20 +379,17 @@ impl Node {
     /// [`Error::Io`] if the file does not exist, [`Error::InvalidPath`] if it
     /// has no usable name, [`Error::UnsafeName`] if a receiver could not save
     /// it under that name, [`Error::Store`] if the import fails.
-    pub async fn share_file(
-        &self,
-        path: &Path,
-        recipients: &[PeerId],
-    ) -> Result<ContentHash, Error> {
+    pub async fn share_file(&self, path: &Path, recipients: &[PeerId]) -> Result<Shared, Error> {
         // The store requires an absolute path; this also fails if the file is missing.
         let path = tokio::fs::canonicalize(path)
             .await
             .map_err(Error::io(path))?;
         let name = file_name(&path)?;
-        self.share_entries(vec![(name, path)], recipients).await
+        self.share_entries(name.clone(), vec![(name, path)], recipients)
+            .await
     }
 
-    /// Imports a folder and shares it with `recipients`; returns the share's hash.
+    /// Imports a folder, shares it with `recipients` and offers it to them.
     ///
     /// Like [`share_file`](Self::share_file): only recipients may fetch it, and
     /// files are referenced in place.
@@ -400,16 +404,13 @@ impl Node {
     /// [`Error::InvalidPath`] if a name is not UTF-8, [`Error::UnsafeName`] if
     /// a receiver could not save a name, [`Error::Store`] if an import fails.
     // shortcut: a collection only lists files, so empty folders are lost; needs a marker format to fix.
-    pub async fn share_folder(
-        &self,
-        path: &Path,
-        recipients: &[PeerId],
-    ) -> Result<ContentHash, Error> {
+    pub async fn share_folder(&self, path: &Path, recipients: &[PeerId]) -> Result<Shared, Error> {
         let root = tokio::fs::canonicalize(path)
             .await
             .map_err(Error::io(path))?;
         let mut entries = Vec::new();
-        let mut pending = vec![(file_name(&root)?, root)];
+        let title = file_name(&root)?;
+        let mut pending = vec![(title.clone(), root)];
         while let Some((name, dir)) = pending.pop() {
             let mut read = tokio::fs::read_dir(&dir).await.map_err(Error::io(&dir))?;
             while let Some(entry) = read.next_entry().await.map_err(Error::io(&dir))? {
@@ -425,24 +426,31 @@ impl Node {
             }
         }
         entries.sort();
-        self.share_entries(entries, recipients).await
+        self.share_entries(title, entries, recipients).await
     }
 
-    /// Imports each `(name, path)`, stores them as one tagged collection and
-    /// saves it as a share for `recipients`.
+    /// Imports each `(name, path)`, stores them as one tagged collection,
+    /// saves it as a share for `recipients` and offers it to them.
     async fn share_entries(
         &self,
+        title: String,
         entries: Vec<(String, PathBuf)>,
         recipients: &[PeerId],
-    ) -> Result<ContentHash, Error> {
+    ) -> Result<Shared, Error> {
         // Refuse here what the receiver's export would refuse, before importing anything.
         for (name, _) in &entries {
             check_name(name)?;
         }
         let mut files = Vec::new();
+        let mut sizes = Vec::new();
         // Temp tags keep the blobs alive until the collection references them.
         let mut tags = Vec::new();
         for (name, path) in entries {
+            let size = tokio::fs::metadata(&path)
+                .await
+                .map_err(Error::io(&path))?
+                .len();
+            sizes.push((name.clone(), size));
             let tag = self
                 .store
                 .blobs()
@@ -478,8 +486,112 @@ impl Node {
         let list = HashSeq::try_from(list).map_err(Error::store)?;
         let mut hashes: Vec<ContentHash> = list.iter().map(ContentHash::from).collect();
         hashes.push(root_hash);
-        self.access.add_share(root_hash, recipients, hashes)?;
-        Ok(root_hash)
+        let share = self.access.add_share(
+            root_hash,
+            db::Share {
+                recipients: recipients.to_vec(),
+                hashes,
+                title,
+                file_count: sizes.len() as u64,
+                total_size: sizes.iter().map(|(_, size)| size).sum(),
+                preview: sizes.into_iter().take(PREVIEW_LEN).collect(),
+            },
+        )?;
+        let undelivered = self.offer(root_hash, &share, recipients).await;
+        Ok(Shared {
+            root: root_hash,
+            undelivered,
+        })
+    }
+
+    /// Tells each recipient about the share, all at once; returns the ones it
+    /// could not reach. An offline recipient costs up to [`OFFER_TIMEOUT`].
+    // shortcut: waits for delivery and never retries; the outbox step moves this to the background and retries.
+    async fn offer(&self, root: ContentHash, share: &db::Share, to: &[PeerId]) -> Vec<PeerId> {
+        let offer = control::ControlMsg::ShareOffer {
+            root,
+            title: share.title.clone(),
+            file_count: share.file_count,
+            total_size: share.total_size,
+            preview: share.preview.clone(),
+        };
+        let sends: Vec<_> = to
+            .iter()
+            .map(|&peer| {
+                let (node, offer) = (self.clone(), offer.clone());
+                let send = tokio::spawn(async move {
+                    let answer =
+                        tokio::time::timeout(OFFER_TIMEOUT, node.request(peer, &offer)).await;
+                    matches!(answer, Ok(Ok(control::ControlMsg::OfferReceived)))
+                });
+                (peer, send)
+            })
+            .collect();
+        let mut undelivered = Vec::new();
+        for (peer, send) in sends {
+            if !matches!(send.await, Ok(true)) {
+                warn!(peer = %peer.short(), share = %root.short(), "offer not delivered");
+                undelivered.push(peer);
+            }
+        }
+        undelivered
+    }
+
+    /// Every share offered to us, in any state.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Database`] if the inbox cannot be read.
+    pub fn inbox(&self) -> Result<Vec<Offer>, Error> {
+        self.access.db().inbox()
+    }
+
+    /// Accepts an offer: fetches the share from its sender and saves it into
+    /// the existing folder `dest`, like [`fetch`](Self::fetch) then
+    /// [`export`](Self::export). Returns the paths written.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::UnknownOffer`] if `from` never offered `root`, otherwise the
+    /// errors of [`fetch`](Self::fetch) and [`export`](Self::export).
+    pub async fn accept(
+        &self,
+        from: PeerId,
+        root: ContentHash,
+        dest: &Path,
+    ) -> Result<Vec<PathBuf>, Error> {
+        let offered = self
+            .inbox()?
+            .iter()
+            .any(|offer| offer.from == from && offer.root == root);
+        if !offered {
+            return Err(Error::UnknownOffer);
+        }
+        self.fetch(from, root).await?;
+        let written = self.export(root, dest).await?;
+        self.access
+            .db()
+            .set_offer_state(from, root, OfferState::Done)?;
+        Ok(written)
+    }
+
+    /// Declines an offer. It stays in the inbox, marked declined; the sender
+    /// is not told.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::UnknownOffer`] if `from` never offered `root`,
+    /// [`Error::Database`] if the change cannot be saved.
+    pub fn decline(&self, from: PeerId, root: ContentHash) -> Result<(), Error> {
+        let found = self
+            .access
+            .db()
+            .set_offer_state(from, root, OfferState::Declined)?;
+        if found {
+            Ok(())
+        } else {
+            Err(Error::UnknownOffer)
+        }
     }
 
     /// Writes a share held in our store into the existing folder `dest`.
