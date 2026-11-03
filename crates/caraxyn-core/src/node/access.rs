@@ -8,7 +8,7 @@ use std::{
 
 use super::db::{Db, Share};
 use crate::{
-    contacts::{Contact, InviteToken},
+    contacts::{Contact, InviteToken, now_ms},
     error::Error,
     ids::{ContentHash, PeerId},
 };
@@ -25,21 +25,19 @@ pub(super) struct Access {
 /// Our shares, indexed for the per-request check.
 #[derive(Debug, Default)]
 struct Shares {
-    /// Share root → who may fetch it.
-    recipients: HashMap<ContentHash, HashSet<PeerId>>,
+    /// Share root → the share as saved (recipients, revoked, expiry).
+    roots: HashMap<ContentHash, Share>,
     /// Any hash in a share (root, name list, file) → the shares containing it.
     containing: HashMap<ContentHash, HashSet<ContentHash>>,
 }
 
 impl Shares {
+    /// Indexes a share as saved, replacing what was known about it.
     fn add(&mut self, root: ContentHash, share: Share) {
-        for hash in share.hashes {
-            self.containing.entry(hash).or_default().insert(root);
+        for hash in &share.hashes {
+            self.containing.entry(*hash).or_default().insert(root);
         }
-        self.recipients
-            .entry(root)
-            .or_default()
-            .extend(share.recipients);
+        self.roots.insert(root, share);
     }
 }
 
@@ -61,11 +59,13 @@ impl Access {
     /// a file's bytes could otherwise spell out hashes of other content.
     pub(super) fn may_get(&self, peer: PeerId, hash: ContentHash, as_list: bool) -> bool {
         let shares = self.shares.read().expect("share lock poisoned");
+        let now = now_ms();
+        // Only an active share counts: revoked or expired ones open nothing.
         let is_recipient = |root: &ContentHash| {
             shares
-                .recipients
+                .roots
                 .get(root)
-                .is_some_and(|peers| peers.contains(&peer))
+                .is_some_and(|share| share.is_active(now) && share.recipients.contains(&peer))
         };
         if as_list {
             is_recipient(&hash)
@@ -85,6 +85,35 @@ impl Access {
         // Disk first: if saving fails, memory still matches what is saved.
         let saved = self.db.add_share(root, share)?;
         shares.add(root, saved.clone());
+        Ok(saved)
+    }
+
+    /// Revokes a share, then updates the index. `None` if there is no such share.
+    pub(super) fn revoke(&self, root: ContentHash, now: u64) -> Result<Option<Share>, Error> {
+        self.change_share(root, |db| db.revoke(root, now))
+    }
+
+    /// Sets a share's expiry, then updates the index. `None` if there is no such share.
+    pub(super) fn set_expiry(
+        &self,
+        root: ContentHash,
+        expires_at: Option<u64>,
+        now: u64,
+    ) -> Result<Option<Share>, Error> {
+        self.change_share(root, |db| db.set_expiry(root, expires_at, now))
+    }
+
+    fn change_share(
+        &self,
+        root: ContentHash,
+        save: impl FnOnce(&Db) -> Result<Option<Share>, Error>,
+    ) -> Result<Option<Share>, Error> {
+        // Lock held across the save, so memory and disk cannot disagree.
+        let mut shares = self.shares.write().expect("share lock poisoned");
+        let saved = save(&self.db)?;
+        if let Some(share) = &saved {
+            shares.add(root, share.clone());
+        }
         Ok(saved)
     }
 
@@ -121,8 +150,8 @@ impl Access {
         let mut shares = self.shares.write().expect("share lock poisoned");
         self.db.remove_contact(peer)?;
         allowed.remove(&peer);
-        for recipients in shares.recipients.values_mut() {
-            recipients.remove(&peer);
+        for share in shares.roots.values_mut() {
+            share.recipients.retain(|p| *p != peer);
         }
         Ok(())
     }

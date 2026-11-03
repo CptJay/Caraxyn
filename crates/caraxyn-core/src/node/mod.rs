@@ -400,8 +400,10 @@ impl Node {
     /// [`pending_offers`](Self::pending_offers)).
     ///
     /// Only recipients may fetch it, and only if they may connect at all (a
-    /// contact, or [allowed](Self::allow)). Sharing the same content again adds
-    /// recipients to the ones it had.
+    /// contact, or [allowed](Self::allow)), and only until `expires_at` (unix
+    /// ms) if given. Sharing the same content again adds recipients to the ones
+    /// it had and sets the new expiry; after a [revoke](Self::revoke) it starts
+    /// afresh with only the new recipients.
     ///
     /// The file is referenced in place rather than copied: it must not be
     /// changed, moved or deleted while it is shared. The share is a collection
@@ -416,13 +418,14 @@ impl Node {
         &self,
         path: &Path,
         recipients: &[PeerId],
+        expires_at: Option<u64>,
     ) -> Result<ContentHash, Error> {
         // The store requires an absolute path; this also fails if the file is missing.
         let path = tokio::fs::canonicalize(path)
             .await
             .map_err(Error::io(path))?;
         let name = file_name(&path)?;
-        self.share_entries(name.clone(), vec![(name, path)], recipients)
+        self.share_entries(name.clone(), vec![(name, path)], recipients, expires_at)
             .await
     }
 
@@ -446,6 +449,7 @@ impl Node {
         &self,
         path: &Path,
         recipients: &[PeerId],
+        expires_at: Option<u64>,
     ) -> Result<ContentHash, Error> {
         let root = tokio::fs::canonicalize(path)
             .await
@@ -468,7 +472,8 @@ impl Node {
             }
         }
         entries.sort();
-        self.share_entries(title, entries, recipients).await
+        self.share_entries(title, entries, recipients, expires_at)
+            .await
     }
 
     /// Imports each `(name, path)`, stores them as one tagged collection,
@@ -478,6 +483,7 @@ impl Node {
         title: String,
         entries: Vec<(String, PathBuf)>,
         recipients: &[PeerId],
+        expires_at: Option<u64>,
     ) -> Result<ContentHash, Error> {
         // Refuse here what the receiver's export would refuse, before importing anything.
         for (name, _) in &entries {
@@ -537,10 +543,55 @@ impl Node {
                 file_count: sizes.len() as u64,
                 total_size: sizes.iter().map(|(_, size)| size).sum(),
                 preview: sizes.into_iter().take(PREVIEW_LEN).collect(),
+                revoked_at: None,
+                expires_at,
             },
         )?;
         self.postman.notify_one();
         Ok(root_hash)
+    }
+
+    /// Withdraws one of our shares: from now on nobody can start fetching it,
+    /// and each recipient is told (through the outbox). A download already
+    /// running finishes. Content that is also in another active share stays
+    /// available to that share's recipients.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::UnknownShare`] if there is no such share, [`Error::Database`]
+    /// if it cannot be saved, [`Error::Store`] if its data cannot be released.
+    pub async fn revoke(&self, root: ContentHash) -> Result<(), Error> {
+        if self.access.revoke(root, now_ms())?.is_none() {
+            return Err(Error::UnknownShare);
+        }
+        self.postman.notify_one();
+        // shortcut: the store copies are freed at the next collection even if a download still reads them; files shared in place are never touched. Keep the tag until transfers end if that bites.
+        // Not an error: the revoke itself is saved; a leftover tag only keeps
+        // the store copies until this content is revoked or shared again.
+        if let Err(e) = self.store.tags().delete(share_tag(root)).await {
+            warn!(share = %root.short(), %e, "could not release a revoked share's data");
+        }
+        info!(share = %root.short(), "share revoked");
+        Ok(())
+    }
+
+    /// Sets when one of our shares stops being served (unix ms), or `None` for
+    /// never. Moving it into the future serves an expired share again, and
+    /// offers it again to its recipients. Otherwise recipients are not told
+    /// the new time; the sender's own check is what counts.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::UnknownShare`] if there is no such share, [`Error::Database`]
+    /// if it cannot be saved.
+    pub fn set_expiry(&self, root: ContentHash, expires_at: Option<u64>) -> Result<(), Error> {
+        match self.access.set_expiry(root, expires_at, now_ms())? {
+            Some(_) => {
+                self.postman.notify_one();
+                Ok(())
+            }
+            None => Err(Error::UnknownShare),
+        }
     }
 
     /// Every share offered to us, in any state.
@@ -558,20 +609,24 @@ impl Node {
     ///
     /// # Errors
     ///
-    /// [`Error::UnknownOffer`] if `from` never offered `root`, otherwise the
-    /// errors of [`fetch`](Self::fetch) and [`export`](Self::export).
+    /// [`Error::UnknownOffer`] if `from` never offered `root`,
+    /// [`Error::ShareRevoked`] if the sender withdrew it, otherwise the errors
+    /// of [`fetch`](Self::fetch) and [`export`](Self::export) (also when its
+    /// expiry has passed: the sender decides that, as it may have moved it).
     pub async fn accept(
         &self,
         from: PeerId,
         root: ContentHash,
         dest: &Path,
     ) -> Result<Vec<PathBuf>, Error> {
-        let offered = self
+        let offer = self
             .inbox()?
-            .iter()
-            .any(|offer| offer.from == from && offer.root == root);
-        if !offered {
-            return Err(Error::UnknownOffer);
+            .into_iter()
+            .find(|offer| offer.from == from && offer.root == root)
+            .ok_or(Error::UnknownOffer)?;
+        // Known locally, so no need to ask the sender (who would refuse anyway).
+        if offer.state == OfferState::Revoked {
+            return Err(Error::ShareRevoked);
         }
         self.fetch(from, root).await?;
         let written = self.export(root, dest).await?;

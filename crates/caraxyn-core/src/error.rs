@@ -52,6 +52,12 @@ pub enum Error {
     /// The other device refused the invite: unknown, already used or expired.
     #[error("the invite was refused (it may be used or expired)")]
     ContactRejected,
+    /// We have no share with that hash.
+    #[error("no such share")]
+    UnknownShare,
+    /// The sender revoked this share.
+    #[error("the sender revoked this share")]
+    ShareRevoked,
     /// There is no such offer in the inbox.
     #[error("no such offer in the inbox")]
     UnknownOffer,
