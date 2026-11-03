@@ -7,7 +7,7 @@ use std::{
     collections::{HashMap, HashSet},
     path::{Path, PathBuf},
     sync::Arc,
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use iroh::{
@@ -21,7 +21,7 @@ use iroh_blobs::{
     api::{
         Store,
         blobs::{AddPathOptions, ImportMode},
-        downloader::Shuffled,
+        downloader::{DownloadProgress, DownloadProgressItem, Shuffled},
     },
     format::collection::Collection,
     hashseq::HashSeq,
@@ -33,7 +33,8 @@ use iroh_blobs::{
         fs::{FsStore, options::Options},
     },
 };
-use tokio::sync::{Notify, watch};
+use n0_future::StreamExt;
+use tokio::sync::{Notify, broadcast, watch};
 use tracing::{info, warn};
 
 use crate::{
@@ -42,6 +43,7 @@ use crate::{
         encode_invite, now_ms,
     },
     error::Error,
+    events::{EVENT_BUFFER, Event, tell, warn_about},
     ids::{ContentHash, PeerId},
     safe_name,
     shares::{Offer, OfferState, PREVIEW_LEN},
@@ -59,6 +61,9 @@ struct Timing {
     /// How long one recipient may take to take an offer before it counts as not reached.
     offer_timeout: Duration,
 }
+
+/// Longest gap between two progress events of one download.
+const PROGRESS_EVERY: Duration = Duration::from_millis(250);
 
 /// The real timing.
 const TIMING: Timing = Timing {
@@ -127,6 +132,8 @@ pub struct Node {
     postman: Arc<Notify>,
     /// Tells the outbox task to stop.
     stop: Arc<watch::Sender<bool>>,
+    /// Where [`events`](Self::events) listeners get what happens.
+    events: broadcast::Sender<Event>,
 }
 
 impl Node {
@@ -178,7 +185,7 @@ impl Node {
             .bind()
             .await
             .map_err(|e| Error::Bind(e.to_string()))?;
-        let (events, requests) = EventSender::channel(
+        let (blob_events, requests) = EventSender::channel(
             16,
             EventMask {
                 connected: ConnectMode::Intercept,
@@ -192,13 +199,18 @@ impl Node {
         // Ends by itself when the router (and with it the sender) is dropped.
         tokio::spawn(run_blob_gate(Arc::clone(&access), requests));
         let postman = Arc::new(Notify::new());
+        let (events, _) = broadcast::channel(EVENT_BUFFER);
         let router = Router::builder(endpoint)
-            .accept(iroh_blobs::ALPN, BlobsProtocol::new(&store, Some(events)))
+            .accept(
+                iroh_blobs::ALPN,
+                BlobsProtocol::new(&store, Some(blob_events)),
+            )
             .accept(
                 control::CONTROL_ALPN,
                 control::ControlHandler {
                     access: Arc::clone(&access),
                     postman: Arc::clone(&postman),
+                    events: events.clone(),
                 },
             )
             .spawn();
@@ -210,10 +222,19 @@ impl Node {
             timing,
             postman,
             stop: Arc::new(stop),
+            events,
         };
         tokio::spawn(node.clone().run_postman(stopped));
         info!(peer = %node.peer_id().short(), "node started");
         Ok(node)
+    }
+
+    /// A new listener for what happens in this node (offers arriving, contacts
+    /// added, deliveries, download progress, background warnings). See
+    /// [`Event`] for what a slow listener should do.
+    #[must_use]
+    pub fn events(&self) -> broadcast::Receiver<Event> {
+        self.events.subscribe()
     }
 
     /// This node's identity.
@@ -296,6 +317,12 @@ impl Node {
                 // shortcut: if this save fails, the inviter has us as a contact but we lack them; redeeming again is refused then.
                 self.access.add_contact(&contact)?;
                 info!(peer = %contact.peer.short(), "contact added");
+                tell(
+                    &self.events,
+                    Event::ContactAdded {
+                        contact: contact.clone(),
+                    },
+                );
                 Ok(contact)
             }
             _ => Err(Error::ContactRejected),
@@ -357,6 +384,16 @@ impl Node {
     /// bad data.
     // shortcut: iroh reports a refusal as a plain failed download, so it cannot be told apart yet; add Error::Refused if a caller needs it.
     pub async fn fetch(&self, from: PeerId, root: ContentHash) -> Result<(), Error> {
+        self.fetch_with_total(from, root, None).await
+    }
+
+    /// [`fetch`](Self::fetch), with the expected size for progress events.
+    async fn fetch_with_total(
+        &self,
+        from: PeerId,
+        root: ContentHash,
+        total: Option<u64>,
+    ) -> Result<(), Error> {
         let provider = EndpointId::from_bytes(from.as_ref()).map_err(|_| Error::InvalidPeerId)?;
         // Before the download, so garbage collection cannot delete half of it.
         self.store
@@ -364,14 +401,11 @@ impl Node {
             .set(recv_tag(root), HashAndFormat::hash_seq(root.into()))
             .await
             .map_err(Error::store)?;
-        let download = self
-            .store
-            .downloader(self.router.endpoint())
-            .download(
-                HashAndFormat::hash_seq(root.into()),
-                Shuffled::new(vec![provider]),
-            )
-            .await;
+        let download = self.store.downloader(self.router.endpoint()).download(
+            HashAndFormat::hash_seq(root.into()),
+            Shuffled::new(vec![provider]),
+        );
+        let download = self.follow(download, from, root, total).await;
         if let Err(e) = download {
             // The tag stays when the share's file list arrived, so a retry resumes.
             // Without the list there is nothing to resume, and the tag would only
@@ -390,6 +424,44 @@ impl Node {
             return Err(Error::store(e));
         }
         info!(from = %from.short(), share = %root.short(), "share fetched");
+        Ok(())
+    }
+
+    /// Waits for a download to finish, sending [`Event::Progress`] along the way.
+    async fn follow(
+        &self,
+        download: DownloadProgress,
+        from: PeerId,
+        root: ContentHash,
+        total: Option<u64>,
+    ) -> Result<(), String> {
+        let progress = |bytes| Event::Progress {
+            from,
+            root,
+            bytes,
+            total,
+        };
+        let mut items = download.stream().await.map_err(|e| e.to_string())?;
+        let (mut bytes, mut last_told) = (0, None::<Instant>);
+        while let Some(item) = items.next().await {
+            match item {
+                DownloadProgressItem::Progress(now) => {
+                    bytes = now;
+                    // iroh reports every chunk; a few per second is plenty for a GUI.
+                    if last_told.is_none_or(|at| at.elapsed() >= PROGRESS_EVERY) {
+                        tell(&self.events, progress(bytes));
+                        last_told = Some(Instant::now());
+                    }
+                }
+                DownloadProgressItem::Error(e) => return Err(e.to_string()),
+                DownloadProgressItem::DownloadError => return Err("download failed".into()),
+                _ => {}
+            }
+        }
+        // Always one at the end, so a listener sees where it finished. Success
+        // means the whole share is here, even when iroh had nothing left to fetch
+        // and so reported no progress at all.
+        tell(&self.events, progress(bytes.max(total.unwrap_or(bytes))));
         Ok(())
     }
 
@@ -569,7 +641,7 @@ impl Node {
         // Not an error: the revoke itself is saved; a leftover tag only keeps
         // the store copies until this content is revoked or shared again.
         if let Err(e) = self.store.tags().delete(share_tag(root)).await {
-            warn!(share = %root.short(), %e, "could not release a revoked share's data");
+            warn_about(&self.events, "releasing a revoked share's data", e);
         }
         info!(share = %root.short(), "share revoked");
         Ok(())
@@ -628,7 +700,8 @@ impl Node {
         if offer.state == OfferState::Revoked {
             return Err(Error::ShareRevoked);
         }
-        self.fetch(from, root).await?;
+        self.fetch_with_total(from, root, Some(offer.total_size))
+            .await?;
         let written = self.export(root, dest).await?;
         self.access
             .db()

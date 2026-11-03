@@ -1,5 +1,7 @@
 use std::time::Duration;
 
+use tokio::sync::broadcast;
+
 use tempfile::TempDir;
 
 use super::*;
@@ -2237,4 +2239,209 @@ async fn extending_an_expired_share_offers_it_again() {
     b.accept(a.node.peer_id(), root, out.path()).await.unwrap();
     a.node.shutdown().await.unwrap();
     b.shutdown().await.unwrap();
+}
+
+/// Waits up to 10 s for the first event `want` accepts, skipping others.
+async fn next_event(
+    events: &mut broadcast::Receiver<Event>,
+    what: &str,
+    want: impl Fn(&Event) -> bool,
+) -> Event {
+    let wait = async {
+        loop {
+            let event = events.recv().await.unwrap();
+            if want(&event) {
+                return event;
+            }
+        }
+    };
+    tokio::time::timeout(Duration::from_secs(10), wait)
+        .await
+        .unwrap_or_else(|_| panic!("timed out waiting for {what}"))
+}
+
+#[tokio::test]
+async fn both_sides_of_an_invite_hear_about_the_new_contact() {
+    let lookup = MemoryLookup::new();
+    let (a, b) = (offline_node(&lookup).await, offline_node(&lookup).await);
+    let (mut a_events, mut b_events) = (a.node.events(), b.node.events());
+
+    befriend(&a.node, &b.node).await;
+
+    let added = |e: &Event| matches!(e, Event::ContactAdded { .. });
+    let Event::ContactAdded { contact: on_a } = next_event(&mut a_events, "A's event", added).await
+    else {
+        unreachable!()
+    };
+    let Event::ContactAdded { contact: on_b } = next_event(&mut b_events, "B's event", added).await
+    else {
+        unreachable!()
+    };
+    assert_eq!((on_a.peer, on_a.name.as_str()), (b.node.peer_id(), "B"));
+    assert_eq!((on_b.peer, on_b.name.as_str()), (a.node.peer_id(), "A"));
+    a.node.shutdown().await.unwrap();
+    b.node.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn offers_and_revokes_are_announced_on_both_sides() {
+    let lookup = MemoryLookup::new();
+    let (a, b) = (offline_node(&lookup).await, offline_node(&lookup).await);
+    befriend(&a.node, &b.node).await;
+    let (mut a_events, mut b_events) = (a.node.events(), b.node.events());
+    let (_src, path) = write_file("x.txt", b"x");
+
+    let root = a
+        .node
+        .share_file(&path, &[b.node.peer_id()], None)
+        .await
+        .unwrap();
+
+    let received = next_event(&mut b_events, "the offer", |e| {
+        matches!(e, Event::OfferReceived { .. })
+    })
+    .await;
+    assert!(matches!(received, Event::OfferReceived { offer } if offer.root == root));
+    let delivered = Event::Delivered {
+        to: b.node.peer_id(),
+        root,
+        revoke: false,
+    };
+    next_event(&mut a_events, "the delivery", |e| *e == delivered).await;
+
+    a.node.revoke(root).await.unwrap();
+
+    let revoked = Event::OfferRevoked {
+        from: a.node.peer_id(),
+        root,
+    };
+    next_event(&mut b_events, "the revoke", |e| *e == revoked).await;
+    let revoke_delivered = Event::Delivered {
+        to: b.node.peer_id(),
+        root,
+        revoke: true,
+    };
+    next_event(&mut a_events, "the revoke's delivery", |e| {
+        *e == revoke_delivered
+    })
+    .await;
+    a.node.shutdown().await.unwrap();
+    b.node.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn a_refused_offer_is_announced_as_undeliverable() {
+    let lookup = MemoryLookup::new();
+    let (a, b) = (offline_node(&lookup).await, offline_node(&lookup).await);
+    let mut a_events = a.node.events();
+    let (_src, path) = write_file("x.txt", b"x");
+
+    // Not a contact: B refuses.
+    let root = a
+        .node
+        .share_file(&path, &[b.node.peer_id()], None)
+        .await
+        .unwrap();
+
+    let undeliverable = Event::Undeliverable {
+        to: b.node.peer_id(),
+        root,
+        revoke: false,
+    };
+    next_event(&mut a_events, "the refusal", |e| *e == undeliverable).await;
+    a.node.shutdown().await.unwrap();
+    b.node.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn accepting_reports_progress_up_to_the_whole_share() {
+    let lookup = MemoryLookup::new();
+    let (a, b) = (offline_node(&lookup).await, offline_node(&lookup).await);
+    befriend(&a.node, &b.node).await;
+    let content = vec![7u8; 3 << 20];
+    let (_src, path) = write_file("big.bin", &content);
+    let root = a
+        .node
+        .share_file(&path, &[b.node.peer_id()], None)
+        .await
+        .unwrap();
+    wait_for_inbox(&b.node, 1).await;
+    let mut b_events = b.node.events();
+    let out = TempDir::new().unwrap();
+
+    b.node
+        .accept(a.node.peer_id(), root, out.path())
+        .await
+        .unwrap();
+
+    let mut seen = Vec::new();
+    while let Ok(event) = b_events.try_recv() {
+        if let Event::Progress {
+            from,
+            root: r,
+            bytes,
+            total,
+        } = event
+        {
+            assert_eq!((from, r, total), (a.node.peer_id(), root, Some(3 << 20)));
+            seen.push(bytes);
+        }
+    }
+    assert!(!seen.is_empty());
+    assert!(seen.windows(2).all(|w| w[0] <= w[1]), "went down: {seen:?}");
+    // The last one covers the whole share (the file plus its small list of names).
+    assert!(*seen.last().unwrap() >= 3 << 20, "ended at {seen:?}");
+    a.node.shutdown().await.unwrap();
+    b.node.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn a_listener_that_falls_behind_is_told_and_the_node_carries_on() {
+    let a = offline_node(&MemoryLookup::new()).await;
+    let mut slow = a.node.events();
+
+    for i in 0..crate::events::EVENT_BUFFER + 10 {
+        crate::events::warn_about(&a.node.events, "testing", i);
+    }
+
+    assert!(matches!(
+        slow.recv().await,
+        Err(broadcast::error::RecvError::Lagged(10))
+    ));
+    let (_src, path) = write_file("x.txt", b"x");
+    a.node.share_file(&path, &[], None).await.unwrap();
+    a.node.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn a_download_with_nothing_left_to_fetch_still_ends_complete() {
+    let lookup = MemoryLookup::new();
+    let (a, b) = (offline_node(&lookup).await, offline_node(&lookup).await);
+    befriend(&a.node, &b.node).await;
+    let (_src, path) = write_file("big.bin", &vec![7u8; 1 << 20]);
+    let root = a
+        .node
+        .share_file(&path, &[b.node.peer_id()], None)
+        .await
+        .unwrap();
+    wait_for_inbox(&b.node, 1).await;
+    // Already in B's store, so accepting downloads nothing.
+    b.node.fetch(a.node.peer_id(), root).await.unwrap();
+    let mut b_events = b.node.events();
+    let out = TempDir::new().unwrap();
+
+    b.node
+        .accept(a.node.peer_id(), root, out.path())
+        .await
+        .unwrap();
+
+    let mut last = None;
+    while let Ok(event) = b_events.try_recv() {
+        if let Event::Progress { bytes, total, .. } = event {
+            last = Some((bytes, total));
+        }
+    }
+    assert_eq!(last, Some((1 << 20, Some(1 << 20))));
+    a.node.shutdown().await.unwrap();
+    b.node.shutdown().await.unwrap();
 }
