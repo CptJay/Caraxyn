@@ -8,13 +8,16 @@ use crate::ids::{ContentHash, PeerId};
 /// Keeps an offer for a huge folder small.
 pub const PREVIEW_LEN: usize = 200;
 
-/// An offer still waiting to reach its recipient (offline, or not reached yet).
+/// A message about a share still waiting to reach its recipient (offline, or
+/// not reached yet).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PendingOffer {
     /// Who it is for.
     pub to: PeerId,
     /// The share's hash.
     pub root: ContentHash,
+    /// `false`: the offer itself; `true`: telling them it was revoked.
+    pub revoke: bool,
     /// How many times delivery failed so far.
     pub attempts: u32,
 }
@@ -34,6 +37,8 @@ pub struct Offer {
     pub total_size: u64,
     /// The first files (at most [`PREVIEW_LEN`]): path in the share and size.
     pub preview: Vec<(String, u64)>,
+    /// When the sender stops serving it, in unix ms, if ever.
+    pub expires_at: Option<u64>,
     /// When it arrived, in unix milliseconds.
     pub received_at: u64,
     /// What we did with it.
@@ -49,4 +54,6 @@ pub enum OfferState {
     Declined,
     /// Accepted, fetched and saved.
     Done,
+    /// The sender withdrew it before we saved it.
+    Revoked,
 }

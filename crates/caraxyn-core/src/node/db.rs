@@ -28,15 +28,36 @@ const SHARES: TableDefinition<&[u8; 32], &[u8]> = TableDefinition::new("shares")
 /// Offers others sent us. Key: sender id then share root; value: the [`Offer`] in postcard.
 const INBOX: TableDefinition<&[u8; 64], &[u8]> = TableDefinition::new("inbox");
 
-/// Offers we still have to deliver. Key: recipient id then share root; value:
-/// failed attempts so far and when to try next (unix ms; 0 = now).
-const OUTBOX: TableDefinition<&[u8; 64], (u32, u64)> = TableDefinition::new("outbox");
+/// Messages we still have to deliver. Key: recipient id then share root;
+/// value: what it is ([`Mail`] as a byte), failed attempts so far and when to
+/// try next (unix ms; 0 = now).
+const OUTBOX: TableDefinition<&[u8; 64], (u8, u32, u64)> = TableDefinition::new("outbox");
 
-/// One offer waiting in the outbox.
+/// What waits in the outbox for one recipient and share.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Mail {
+    /// The share's offer.
+    Offer = 0,
+    /// The news that it was revoked.
+    Revoke = 1,
+}
+
+impl Mail {
+    fn from_byte(byte: u8) -> Self {
+        if byte == Mail::Revoke as u8 {
+            Mail::Revoke
+        } else {
+            Mail::Offer
+        }
+    }
+}
+
+/// One message waiting in the outbox.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) struct OutboxEntry {
     pub(super) to: PeerId,
     pub(super) root: ContentHash,
+    pub(super) mail: Mail,
     pub(super) attempts: u32,
     /// When to try next, in unix ms.
     pub(super) next_try: u64,
@@ -58,6 +79,17 @@ pub(super) struct Share {
     pub(super) total_size: u64,
     /// The first files by path and size, as sent in offers.
     pub(super) preview: Vec<(String, u64)>,
+    /// When it was revoked (unix ms), if it was.
+    pub(super) revoked_at: Option<u64>,
+    /// When it stops being served (unix ms), if ever.
+    pub(super) expires_at: Option<u64>,
+}
+
+impl Share {
+    /// Whether it is still served at time `now`: not revoked, not expired.
+    pub(super) fn is_active(&self, now: u64) -> bool {
+        self.revoked_at.is_none() && self.expires_at.is_none_or(|at| now < at)
+    }
 }
 
 /// Inbox and outbox key: the other peer's id followed by the share root.
@@ -211,21 +243,28 @@ impl Db {
 
     /// Saves a share and queues an offer to each of its `share.recipients`, in
     /// one write, so a crash never leaves a share without its offers. Recipients
-    /// it already had are kept. Returns the share as saved.
+    /// it already had are kept, unless it was revoked: then it starts afresh, so
+    /// sharing it with someone new does not reopen it for those revoked.
+    /// Returns the share as saved.
     pub(super) fn add_share(&self, root: ContentHash, mut share: Share) -> Result<Share, Error> {
         let tx = self.0.begin_write().map_err(Error::database)?;
         {
             let mut outbox = tx.open_table(OUTBOX).map_err(Error::database)?;
             for peer in &share.recipients {
                 outbox
-                    .insert(&pair_key(*peer, root), (0, 0))
+                    .insert(&pair_key(*peer, root), (Mail::Offer as u8, 0, 0))
                     .map_err(Error::database)?;
             }
         }
         let share = {
             let mut table = tx.open_table(SHARES).map_err(Error::database)?;
-            if let Some(row) = table.get(root.as_ref()).map_err(Error::database)? {
-                let old: Share = postcard::from_bytes(row.value()).map_err(Error::database)?;
+            let old: Option<Share> = table
+                .get(root.as_ref())
+                .map_err(Error::database)?
+                .map(|row| postcard::from_bytes(row.value()))
+                .transpose()
+                .map_err(Error::database)?;
+            if let Some(old) = old.filter(|old| old.revoked_at.is_none()) {
                 let mut recipients = old.recipients;
                 for peer in share.recipients {
                     if !recipients.contains(&peer) {
@@ -242,6 +281,81 @@ impl Db {
         };
         tx.commit().map_err(Error::database)?;
         Ok(share)
+    }
+
+    /// Marks a share revoked at `now` and queues the news to each recipient,
+    /// in place of any offer still waiting. `None` if there is no such share.
+    pub(super) fn revoke(&self, root: ContentHash, now: u64) -> Result<Option<Share>, Error> {
+        self.change_share(root, |share, outbox| {
+            share.revoked_at = Some(now);
+            for peer in &share.recipients {
+                outbox
+                    .insert(&pair_key(*peer, root), (Mail::Revoke as u8, 0, 0))
+                    .map_err(Error::database)?;
+            }
+            Ok(())
+        })
+    }
+
+    /// Sets or clears a share's expiry. If that makes an expired share active
+    /// again at `now`, its offer is queued again for every recipient with
+    /// nothing waiting, since offers to an expired share were dropped. `None`
+    /// if there is no such share.
+    pub(super) fn set_expiry(
+        &self,
+        root: ContentHash,
+        expires_at: Option<u64>,
+        now: u64,
+    ) -> Result<Option<Share>, Error> {
+        self.change_share(root, |share, outbox| {
+            let was_active = share.is_active(now);
+            share.expires_at = expires_at;
+            if !was_active && share.is_active(now) {
+                for peer in &share.recipients {
+                    let key = pair_key(*peer, root);
+                    if outbox.get(&key).map_err(Error::database)?.is_none() {
+                        outbox
+                            .insert(&key, (Mail::Offer as u8, 0, 0))
+                            .map_err(Error::database)?;
+                    }
+                }
+            }
+            Ok(())
+        })
+    }
+
+    /// Loads a share, lets `change` edit it (and the outbox) and saves it, in
+    /// one write. `None` if there is no such share.
+    fn change_share(
+        &self,
+        root: ContentHash,
+        change: impl FnOnce(
+            &mut Share,
+            &mut redb::Table<&[u8; 64], (u8, u32, u64)>,
+        ) -> Result<(), Error>,
+    ) -> Result<Option<Share>, Error> {
+        let tx = self.0.begin_write().map_err(Error::database)?;
+        let share = {
+            let mut table = tx.open_table(SHARES).map_err(Error::database)?;
+            let found: Option<Share> = table
+                .get(root.as_ref())
+                .map_err(Error::database)?
+                .map(|row| postcard::from_bytes(row.value()))
+                .transpose()
+                .map_err(Error::database)?;
+            let Some(mut share) = found else {
+                return Ok(None);
+            };
+            let mut outbox = tx.open_table(OUTBOX).map_err(Error::database)?;
+            change(&mut share, &mut outbox)?;
+            let bytes = postcard::to_allocvec(&share).expect("a share always serializes");
+            table
+                .insert(root.as_ref(), bytes.as_slice())
+                .map_err(Error::database)?;
+            share
+        };
+        tx.commit().map_err(Error::database)?;
+        Ok(Some(share))
     }
 
     /// Every share, by root hash.
@@ -274,11 +388,12 @@ impl Db {
         let rows = table.iter().map_err(Error::database)?;
         rows.map(|row| {
             let (key, value) = row.map_err(Error::database)?;
-            let (key, (attempts, next_try)) = (key.value(), value.value());
+            let (key, (mail, attempts, next_try)) = (key.value(), value.value());
             let (to, root) = key.split_at(32);
             Ok(OutboxEntry {
                 to: PeerId::from(<[u8; 32]>::try_from(to).expect("32 bytes")),
                 root: ContentHash::from(<[u8; 32]>::try_from(root).expect("32 bytes")),
+                mail: Mail::from_byte(mail),
                 attempts,
                 next_try,
             })
@@ -286,33 +401,55 @@ impl Db {
         .collect()
     }
 
-    /// Takes an offer out of the outbox (delivered, or never deliverable).
-    pub(super) fn remove_offer(&self, to: PeerId, root: ContentHash) -> Result<(), Error> {
-        let tx = self.0.begin_write().map_err(Error::database)?;
-        tx.open_table(OUTBOX)
-            .map_err(Error::database)?
-            .remove(&pair_key(to, root))
-            .map_err(Error::database)?;
-        tx.commit().map_err(Error::database)
-    }
-
-    /// Records a failed delivery and when to try again.
-    pub(super) fn offer_failed(
+    /// Takes a message out of the outbox (delivered, or never deliverable).
+    pub(super) fn remove_mail(
         &self,
         to: PeerId,
         root: ContentHash,
+        mail: Mail,
+    ) -> Result<(), Error> {
+        self.update_mail(to, root, mail, None)
+    }
+
+    /// Records a failed delivery and when to try again.
+    pub(super) fn mail_failed(
+        &self,
+        to: PeerId,
+        root: ContentHash,
+        mail: Mail,
         attempts: u32,
         next_try: u64,
     ) -> Result<(), Error> {
+        self.update_mail(to, root, mail, Some((attempts, next_try)))
+    }
+
+    /// Removes (`None`) or reschedules the entry for `to` and `root`, but only
+    /// if it still holds `mail`: a revoke may have replaced an offer that was
+    /// on its way, and the offer's result must not wipe out the revoke.
+    fn update_mail(
+        &self,
+        to: PeerId,
+        root: ContentHash,
+        mail: Mail,
+        retry: Option<(u32, u64)>,
+    ) -> Result<(), Error> {
+        let key = pair_key(to, root);
         let tx = self.0.begin_write().map_err(Error::database)?;
         {
             let mut table = tx.open_table(OUTBOX).map_err(Error::database)?;
-            let key = pair_key(to, root);
-            // Only if still queued: it may have been delivered meanwhile.
-            if table.get(&key).map_err(Error::database)?.is_some() {
-                table
-                    .insert(&key, (attempts, next_try))
-                    .map_err(Error::database)?;
+            let stored = table
+                .get(&key)
+                .map_err(Error::database)?
+                .map(|row| row.value().0);
+            if stored == Some(mail as u8) {
+                match retry {
+                    None => drop(table.remove(&key).map_err(Error::database)?),
+                    Some((attempts, next_try)) => {
+                        table
+                            .insert(&key, (mail as u8, attempts, next_try))
+                            .map_err(Error::database)?;
+                    }
+                }
             }
         }
         tx.commit().map_err(Error::database)
@@ -333,7 +470,10 @@ impl Db {
             let mut table = tx.open_table(OUTBOX).map_err(Error::database)?;
             for entry in &waiting {
                 table
-                    .insert(&pair_key(entry.to, entry.root), (entry.attempts, 0))
+                    .insert(
+                        &pair_key(entry.to, entry.root),
+                        (entry.mail as u8, entry.attempts, 0),
+                    )
                     .map_err(Error::database)?;
             }
         }
@@ -348,21 +488,64 @@ impl Db {
         Ok(table.get(peer.as_ref()).map_err(Error::database)?.is_some())
     }
 
-    /// Saves an incoming offer. An offer already in the inbox keeps its state,
-    /// so offering a declined share again does not bring it back.
+    /// Saves an incoming offer. An offer already in the inbox takes the new
+    /// details (title, expiry…) but keeps its state, so offering a declined
+    /// share again does not bring it back. Only a revoked one becomes new
+    /// again: the sender shared it once more.
     pub(super) fn receive_offer(&self, offer: &Offer) -> Result<(), Error> {
         let key = pair_key(offer.from, offer.root);
         let tx = self.0.begin_write().map_err(Error::database)?;
         {
             let mut table = tx.open_table(INBOX).map_err(Error::database)?;
-            if table.get(&key).map_err(Error::database)?.is_none() {
-                let bytes = postcard::to_allocvec(offer).expect("an offer always serializes");
+            let old: Option<Offer> = table
+                .get(&key)
+                .map_err(Error::database)?
+                .map(|row| postcard::from_bytes(row.value()))
+                .transpose()
+                .map_err(Error::database)?;
+            let state = match old.map(|old| old.state) {
+                None | Some(OfferState::Revoked) => OfferState::New,
+                Some(state) => state,
+            };
+            let offer = Offer {
+                state,
+                ..offer.clone()
+            };
+            let bytes = postcard::to_allocvec(&offer).expect("an offer always serializes");
+            table
+                .insert(&key, bytes.as_slice())
+                .map_err(Error::database)?;
+        }
+        tx.commit().map_err(Error::database)
+    }
+
+    /// Marks an offer from `from` revoked, unless it was already saved.
+    /// Returns false if `from` never offered `root`.
+    pub(super) fn revoke_offer(&self, from: PeerId, root: ContentHash) -> Result<bool, Error> {
+        let key = pair_key(from, root);
+        let tx = self.0.begin_write().map_err(Error::database)?;
+        {
+            let mut table = tx.open_table(INBOX).map_err(Error::database)?;
+            let found: Option<Offer> = table
+                .get(&key)
+                .map_err(Error::database)?
+                .map(|row| postcard::from_bytes(row.value()))
+                .transpose()
+                .map_err(Error::database)?;
+            let Some(mut offer) = found else {
+                return Ok(false);
+            };
+            // Files already saved stay saved; only what was not taken yet is withdrawn.
+            if offer.state != OfferState::Done {
+                offer.state = OfferState::Revoked;
+                let bytes = postcard::to_allocvec(&offer).expect("an offer always serializes");
                 table
                     .insert(&key, bytes.as_slice())
                     .map_err(Error::database)?;
             }
         }
-        tx.commit().map_err(Error::database)
+        tx.commit().map_err(Error::database)?;
+        Ok(true)
     }
 
     /// Every offer in the inbox.
@@ -567,6 +750,7 @@ mod tests {
             file_count: 1,
             total_size: 2,
             preview: vec![("trip/a.jpg".into(), 2)],
+            expires_at: None,
             received_at: 3,
             state: OfferState::New,
         }
@@ -598,6 +782,65 @@ mod tests {
             vec![
                 (offer(1, 9).from, OfferState::Declined),
                 (offer(2, 9).from, OfferState::New)
+            ]
+        );
+    }
+
+    #[test]
+    fn an_offer_finishing_late_does_not_wipe_out_the_revoke_that_replaced_it() {
+        let dir = TempDir::new().unwrap();
+        let db = Db::open(&dir.path().join("caraxyn.redb")).unwrap();
+        let (bob, root) = (PeerId::from([1; 32]), ContentHash::from([9; 32]));
+        let share = Share {
+            recipients: vec![bob],
+            hashes: vec![root],
+            ..Share::default()
+        };
+        db.add_share(root, share).unwrap();
+
+        // The offer is on its way when the share is revoked...
+        db.revoke(root, 5).unwrap();
+        // ...and its result arrives afterwards.
+        db.remove_mail(bob, root, Mail::Offer).unwrap();
+        db.mail_failed(bob, root, Mail::Offer, 1, 99).unwrap();
+
+        let outbox = db.outbox().unwrap();
+        assert_eq!(outbox.len(), 1);
+        assert_eq!((outbox[0].mail, outbox[0].attempts), (Mail::Revoke, 0));
+        assert!(!db.share(root).unwrap().unwrap().is_active(6));
+    }
+
+    #[test]
+    fn a_resent_offer_brings_new_details_and_revives_only_a_revoked_one() {
+        let dir = TempDir::new().unwrap();
+        let db = Db::open(&dir.path().join("caraxyn.redb")).unwrap();
+        let (revoked, declined) = (offer(1, 9), offer(2, 9));
+        db.receive_offer(&revoked).unwrap();
+        db.receive_offer(&declined).unwrap();
+        assert!(db.revoke_offer(revoked.from, revoked.root).unwrap());
+        assert!(
+            db.set_offer_state(declined.from, declined.root, OfferState::Declined)
+                .unwrap()
+        );
+
+        for old in [&revoked, &declined] {
+            db.receive_offer(&Offer {
+                expires_at: Some(42),
+                ..old.clone()
+            })
+            .unwrap();
+        }
+
+        let inbox = db.inbox().unwrap();
+        let found: Vec<_> = inbox
+            .iter()
+            .map(|o| (o.from, o.state, o.expires_at))
+            .collect();
+        assert_eq!(
+            found,
+            vec![
+                (revoked.from, OfferState::New, Some(42)),
+                (declined.from, OfferState::Declined, Some(42)),
             ]
         );
     }

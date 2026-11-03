@@ -16,7 +16,7 @@ use tracing::{info, warn};
 use super::{
     Node, Timing,
     control::{ControlError, ControlMsg},
-    db::OutboxEntry,
+    db::{Mail, OutboxEntry},
 };
 use crate::{
     contacts::now_ms,
@@ -60,6 +60,7 @@ impl Node {
             .map(|entry| PendingOffer {
                 to: entry.to,
                 root: entry.root,
+                revoke: entry.mail == Mail::Revoke,
                 attempts: entry.attempts,
             })
             .collect())
@@ -113,7 +114,7 @@ impl Node {
             in_flight.lock().expect("outbox lock poisoned").insert(key);
             let (node, in_flight) = (self.clone(), Arc::clone(in_flight));
             tokio::spawn(async move {
-                let delivery = node.deliver(entry.to, entry.root).await;
+                let delivery = node.deliver(entry).await;
                 if let Err(e) = node.record(entry, delivery) {
                     warn!(%e, "could not update the outbox");
                 }
@@ -129,48 +130,57 @@ impl Node {
 
     /// Updates the outbox after one attempt.
     fn record(&self, entry: OutboxEntry, delivery: Delivery) -> Result<(), Error> {
-        let (to, root) = (entry.to, entry.root);
+        let (to, root, mail) = (entry.to, entry.root, entry.mail);
         match delivery {
             Delivery::Delivered => {
-                info!(to = %to.short(), share = %root.short(), "offer delivered");
-                self.access.db().remove_offer(to, root)
+                info!(to = %to.short(), share = %root.short(), ?mail, "delivered");
+                self.access.db().remove_mail(to, root, mail)
             }
             Delivery::Dropped => {
-                warn!(to = %to.short(), share = %root.short(), "offer refused, not retrying");
-                self.access.db().remove_offer(to, root)
+                warn!(to = %to.short(), share = %root.short(), ?mail, "refused, not retrying");
+                self.access.db().remove_mail(to, root, mail)
             }
             Delivery::Failed => {
                 let attempts = entry.attempts.saturating_add(1);
                 let pause = retry_delay(attempts, &self.timing);
                 let pause = u64::try_from(pause.as_millis()).unwrap_or(u64::MAX);
                 let at = now_ms().saturating_add(pause);
-                self.access.db().offer_failed(to, root, attempts, at)
+                self.access.db().mail_failed(to, root, mail, attempts, at)
             }
         }
     }
 
-    /// One attempt to put the offer for `root` into `to`'s inbox.
-    async fn deliver(&self, to: PeerId, root: ContentHash) -> Delivery {
+    /// One attempt to deliver `entry`'s message.
+    async fn deliver(&self, entry: OutboxEntry) -> Delivery {
+        let (to, root) = (entry.to, entry.root);
         let share = match self.access.db().share(root) {
             Ok(Some(share)) => share,
             Ok(None) => return Delivery::Dropped,
             Err(_) => return Delivery::Failed,
         };
-        // No longer a recipient (removed meanwhile): not even the title may reach them.
-        if !share.recipients.contains(&to) {
-            return Delivery::Dropped;
-        }
-        let offer = ControlMsg::ShareOffer {
-            root,
-            title: share.title,
-            file_count: share.file_count,
-            total_size: share.total_size,
-            preview: share.preview,
+        let (message, expected) = match entry.mail {
+            Mail::Offer => {
+                // No longer a recipient, or the share is withdrawn: not even the
+                // title may reach them.
+                if !share.recipients.contains(&to) || !share.is_active(now_ms()) {
+                    return Delivery::Dropped;
+                }
+                let offer = ControlMsg::ShareOffer {
+                    root,
+                    title: share.title,
+                    file_count: share.file_count,
+                    total_size: share.total_size,
+                    preview: share.preview,
+                    expires_at: share.expires_at,
+                };
+                (offer, ControlMsg::OfferReceived)
+            }
+            Mail::Revoke => (ControlMsg::Revoke { root }, ControlMsg::Ack),
         };
         let answer =
-            tokio::time::timeout(self.timing.offer_timeout, self.request(to, &offer)).await;
+            tokio::time::timeout(self.timing.offer_timeout, self.request(to, &message)).await;
         match answer {
-            Ok(Ok(ControlMsg::OfferReceived)) => Delivery::Delivered,
+            Ok(Ok(reply)) if reply == expected => Delivery::Delivered,
             // Any other answer means it was read and not taken.
             Ok(Ok(_) | Err(ControlError::Refused)) => Delivery::Dropped,
             Ok(Err(_)) | Err(_) => Delivery::Failed,

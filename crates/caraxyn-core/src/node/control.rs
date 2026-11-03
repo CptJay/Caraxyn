@@ -58,9 +58,15 @@ pub(crate) enum ControlMsg {
         total_size: u64,
         /// The first files (at most [`PREVIEW_LEN`]) by path and size.
         preview: Vec<(String, u64)>,
+        /// When the sender stops serving it, in unix ms, if ever.
+        expires_at: Option<u64>,
     },
     /// The offer is in the receiver's inbox.
     OfferReceived,
+    /// "I withdrew that share." Only acted on from the one who offered it.
+    Revoke { root: ContentHash },
+    /// Done; nothing more to say.
+    Ack,
 }
 
 /// Why a control message could not be sent or received.
@@ -186,6 +192,7 @@ fn answer(access: &Access, peer: PeerId, msg: ControlMsg) -> Result<ControlMsg, 
             file_count,
             total_size,
             preview,
+            expires_at,
         } => {
             let offer = Offer {
                 from: peer,
@@ -194,6 +201,7 @@ fn answer(access: &Access, peer: PeerId, msg: ControlMsg) -> Result<ControlMsg, 
                 file_count,
                 total_size,
                 preview,
+                expires_at,
                 received_at: now_ms(),
                 state: OfferState::New,
             };
@@ -210,9 +218,20 @@ fn answer(access: &Access, peer: PeerId, msg: ControlMsg) -> Result<ControlMsg, 
             Ok(ControlMsg::OfferReceived)
         }
         // Answers are never valid requests.
-        ControlMsg::ContactAccepted | ControlMsg::ContactRejected | ControlMsg::OfferReceived => {
-            Err(REFUSED)
-        }
+        // Looked up under the sender's own id, so nobody can revoke someone else's offer.
+        ControlMsg::Revoke { root } => match access.db().revoke_offer(peer, root) {
+            Ok(true) => Ok(ControlMsg::Ack),
+            // Never offered by them (or never reached us): nothing to withdraw.
+            Ok(false) => Err(REFUSED),
+            Err(e) => {
+                warn!(peer = %peer.short(), %e, "could not mark an offer revoked");
+                Err(TRY_LATER)
+            }
+        },
+        ControlMsg::ContactAccepted
+        | ControlMsg::ContactRejected
+        | ControlMsg::OfferReceived
+        | ControlMsg::Ack => Err(REFUSED),
     }
 }
 
@@ -240,6 +259,19 @@ mod tests {
             },
             ControlMsg::ContactAccepted,
             ControlMsg::ContactRejected,
+            ControlMsg::ShareOffer {
+                root: ContentHash::from([1; 32]),
+                title: "trip".into(),
+                file_count: 1,
+                total_size: 2,
+                preview: vec![("trip/a".into(), 2)],
+                expires_at: Some(3),
+            },
+            ControlMsg::OfferReceived,
+            ControlMsg::Revoke {
+                root: ContentHash::from([1; 32]),
+            },
+            ControlMsg::Ack,
         ] {
             let bytes = postcard::to_allocvec(&msg).unwrap();
             assert_eq!(postcard::from_bytes::<ControlMsg>(&bytes).unwrap(), msg);
