@@ -13,14 +13,17 @@ struct TestNode {
 /// Starts an offline node (no discovery, no relay) that other test nodes can
 /// find through `lookup`.
 async fn offline_node(lookup: &MemoryLookup) -> TestNode {
-    node_with_gc(lookup, GC_INTERVAL).await
+    node_with(lookup, TIMING).await
 }
 
-/// Garbage collection interval for tests that want to see it run.
-const FAST_GC: Duration = Duration::from_millis(50);
+/// For tests that want to see garbage collection run.
+const FAST_GC: Timing = Timing {
+    gc_interval: Duration::from_millis(50),
+    ..TIMING
+};
 
-/// Like [`offline_node`], with its own garbage collection interval.
-async fn node_with_gc(lookup: &MemoryLookup, gc_interval: Duration) -> TestNode {
+/// Like [`offline_node`], with its own background timing.
+async fn node_with(lookup: &MemoryLookup, timing: Timing) -> TestNode {
     // Shows logs with: RUST_LOG=caraxyn_core=debug cargo test -- --nocapture
     let _ = tracing_subscriber::fmt()
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
@@ -31,7 +34,7 @@ async fn node_with_gc(lookup: &MemoryLookup, gc_interval: Duration) -> TestNode 
         NodeConfig::new(dir.path()),
         presets::Minimal,
         Some(lookup.clone()),
-        gc_interval,
+        timing,
     )
     .await
     .unwrap();
@@ -80,7 +83,7 @@ async fn shared_file_is_a_one_entry_collection() {
     let a = offline_node(&MemoryLookup::new()).await;
     let (_src, path) = write_file("hello.txt", b"hello world");
 
-    let root = a.node.share_file(&path, &[]).await.unwrap().root;
+    let root = a.node.share_file(&path, &[]).await.unwrap();
 
     assert_eq!(
         read_share(&a.node, root).await,
@@ -94,8 +97,8 @@ async fn same_file_shared_twice_gives_same_hash() {
     let a = offline_node(&MemoryLookup::new()).await;
     let (_src, path) = write_file("a.bin", b"same bytes");
 
-    let first = a.node.share_file(&path, &[]).await.unwrap().root;
-    let second = a.node.share_file(&path, &[]).await.unwrap().root;
+    let first = a.node.share_file(&path, &[]).await.unwrap();
+    let second = a.node.share_file(&path, &[]).await.unwrap();
 
     assert_eq!(first, second);
     a.node.shutdown().await.unwrap();
@@ -106,7 +109,7 @@ async fn zero_byte_file_can_be_shared() {
     let a = offline_node(&MemoryLookup::new()).await;
     let (_src, path) = write_file("empty", b"");
 
-    let root = a.node.share_file(&path, &[]).await.unwrap().root;
+    let root = a.node.share_file(&path, &[]).await.unwrap();
 
     assert_eq!(
         read_share(&a.node, root).await,
@@ -131,7 +134,7 @@ async fn missing_file_is_an_error() {
 async fn editing_a_large_shared_file_breaks_it() {
     let a = offline_node(&MemoryLookup::new()).await;
     let (_src, path) = write_file("f.txt", &vec![1u8; 1 << 20]);
-    let root = a.node.share_file(&path, &[]).await.unwrap().root;
+    let root = a.node.share_file(&path, &[]).await.unwrap();
 
     std::fs::write(&path, vec![2u8; 1 << 20]).unwrap();
 
@@ -146,12 +149,7 @@ async fn fetch_copies_a_small_file() {
     let lookup = MemoryLookup::new();
     let (a, b) = (offline_node(&lookup).await, offline_node(&lookup).await);
     let (_src, path) = write_file("hello.txt", b"hello world");
-    let root = a
-        .node
-        .share_file(&path, &[b.node.peer_id()])
-        .await
-        .unwrap()
-        .root;
+    let root = a.node.share_file(&path, &[b.node.peer_id()]).await.unwrap();
 
     a.node.allow(b.node.peer_id()).unwrap();
     b.node.fetch(a.node.peer_id(), root).await.unwrap();
@@ -171,12 +169,7 @@ async fn fetch_streams_a_large_file() {
     // Not a repeating byte, so a corrupted or reordered chunk would show.
     let content: Vec<u8> = (0..3 << 20).map(|i: u32| (i % 251) as u8).collect();
     let (_src, path) = write_file("big.bin", &content);
-    let root = a
-        .node
-        .share_file(&path, &[b.node.peer_id()])
-        .await
-        .unwrap()
-        .root;
+    let root = a.node.share_file(&path, &[b.node.peer_id()]).await.unwrap();
 
     a.node.allow(b.node.peer_id()).unwrap();
     b.node.fetch(a.node.peer_id(), root).await.unwrap();
@@ -211,12 +204,7 @@ async fn fetching_from_a_stopped_node_fails() {
     let lookup = MemoryLookup::new();
     let (a, b) = (offline_node(&lookup).await, offline_node(&lookup).await);
     let (_src, path) = write_file("hello.txt", b"hello world");
-    let root = a
-        .node
-        .share_file(&path, &[b.node.peer_id()])
-        .await
-        .unwrap()
-        .root;
+    let root = a.node.share_file(&path, &[b.node.peer_id()]).await.unwrap();
     let a_id = a.node.peer_id();
     a.node.shutdown().await.unwrap();
 
@@ -231,12 +219,7 @@ async fn a_stranger_is_refused_until_allowed() {
     let lookup = MemoryLookup::new();
     let (a, b) = (offline_node(&lookup).await, offline_node(&lookup).await);
     let (_src, path) = write_file("hello.txt", b"hello world");
-    let root = a
-        .node
-        .share_file(&path, &[b.node.peer_id()])
-        .await
-        .unwrap()
-        .root;
+    let root = a.node.share_file(&path, &[b.node.peer_id()]).await.unwrap();
 
     let refused = tokio::time::timeout(
         Duration::from_secs(20),
@@ -259,12 +242,7 @@ async fn disallowed_peer_is_refused_again() {
     let lookup = MemoryLookup::new();
     let (a, b) = (offline_node(&lookup).await, offline_node(&lookup).await);
     let (_src, path) = write_file("hello.txt", b"hello world");
-    let root = a
-        .node
-        .share_file(&path, &[b.node.peer_id()])
-        .await
-        .unwrap()
-        .root;
+    let root = a.node.share_file(&path, &[b.node.peer_id()]).await.unwrap();
     a.node.allow(b.node.peer_id()).unwrap();
     a.node.disallow(b.node.peer_id()).unwrap();
 
@@ -305,12 +283,7 @@ async fn fetched(content: &[u8], name: &str) -> (TestNode, TestNode, ContentHash
     let lookup = MemoryLookup::new();
     let (a, b) = (offline_node(&lookup).await, offline_node(&lookup).await);
     let (_src, path) = write_file(name, content);
-    let root = a
-        .node
-        .share_file(&path, &[b.node.peer_id()])
-        .await
-        .unwrap()
-        .root;
+    let root = a.node.share_file(&path, &[b.node.peer_id()]).await.unwrap();
     a.node.allow(b.node.peer_id()).unwrap();
     b.node.fetch(a.node.peer_id(), root).await.unwrap();
     (a, b, root)
@@ -409,8 +382,7 @@ async fn a_folder_round_trips() {
         .node
         .share_folder(&src.path().join("photos"), &[b.node.peer_id()])
         .await
-        .unwrap()
-        .root;
+        .unwrap();
     a.node.allow(b.node.peer_id()).unwrap();
     b.node.fetch(a.node.peer_id(), root).await.unwrap();
     let out = TempDir::new().unwrap();
@@ -447,14 +419,12 @@ async fn same_folder_gives_same_hash_whatever_the_creation_order() {
         .node
         .share_folder(&one.path().join("d"), &[])
         .await
-        .unwrap()
-        .root;
+        .unwrap();
     let h2 = a
         .node
         .share_folder(&two.path().join("d"), &[])
         .await
-        .unwrap()
-        .root;
+        .unwrap();
 
     assert_eq!(h1, h2);
     a.node.shutdown().await.unwrap();
@@ -473,7 +443,7 @@ async fn symlinks_are_not_shared() {
     std::os::unix::fs::symlink(&secret, d.join("link.txt")).unwrap();
     std::os::unix::fs::symlink(dir.path(), d.join("loop")).unwrap();
 
-    let root = a.node.share_folder(&d, &[]).await.unwrap().root;
+    let root = a.node.share_folder(&d, &[]).await.unwrap();
 
     let names: Vec<_> = read_share(&a.node, root)
         .await
@@ -494,8 +464,7 @@ async fn an_empty_folder_shares_nothing() {
         .node
         .share_folder(&dir.path().join("empty"), &[])
         .await
-        .unwrap()
-        .root;
+        .unwrap();
     let out = TempDir::new().unwrap();
 
     assert!(a.node.export(root, out.path()).await.unwrap().is_empty());
@@ -529,8 +498,7 @@ async fn export_refuses_an_existing_top_level_folder() {
         .node
         .share_folder(&src.path().join("photos"), &[])
         .await
-        .unwrap()
-        .root;
+        .unwrap();
     let out = TempDir::new().unwrap();
     std::fs::create_dir(out.path().join("photos")).unwrap();
 
@@ -591,8 +559,7 @@ async fn export_accepts_a_relative_folder() {
         .node
         .share_folder(&src.path().join("photos"), &[])
         .await
-        .unwrap()
-        .root;
+        .unwrap();
     // A relative path to a temp dir, without changing the process-wide current dir.
     let out = TempDir::new_in(".").unwrap();
     let relative = Path::new(".").join(out.path().file_name().unwrap());
@@ -688,14 +655,7 @@ async fn a_saved_file_can_be_deleted_and_received_again() {
 #[tokio::test]
 async fn the_peer_id_survives_a_restart() {
     let dir = TempDir::new().unwrap();
-    let start = || {
-        Node::spawn_with(
-            NodeConfig::new(dir.path()),
-            presets::Minimal,
-            None,
-            GC_INTERVAL,
-        )
-    };
+    let start = || Node::spawn_with(NodeConfig::new(dir.path()), presets::Minimal, None, TIMING);
 
     let first = start().await.unwrap();
     let id = first.peer_id();
@@ -709,14 +669,7 @@ async fn the_peer_id_survives_a_restart() {
 #[tokio::test]
 async fn a_second_node_cannot_use_the_same_data_dir() {
     let dir = TempDir::new().unwrap();
-    let start = || {
-        Node::spawn_with(
-            NodeConfig::new(dir.path()),
-            presets::Minimal,
-            None,
-            GC_INTERVAL,
-        )
-    };
+    let start = || Node::spawn_with(NodeConfig::new(dir.path()), presets::Minimal, None, TIMING);
     let first = start().await.unwrap();
 
     let second = start().await;
@@ -741,7 +694,7 @@ fn disk_usage(dir: &Path) -> u64 {
 async fn wait_for(what: &str, done: impl Fn() -> bool) {
     tokio::time::timeout(Duration::from_secs(10), async {
         while !done() {
-            tokio::time::sleep(FAST_GC).await;
+            tokio::time::sleep(FAST_GC.gc_interval).await;
         }
     })
     .await
@@ -752,22 +705,17 @@ async fn wait_for(what: &str, done: impl Fn() -> bool) {
 async fn a_received_share_is_kept_until_exported_then_freed() {
     let lookup = MemoryLookup::new();
     let a = offline_node(&lookup).await;
-    let b = node_with_gc(&lookup, FAST_GC).await;
+    let b = node_with(&lookup, FAST_GC).await;
     let content = vec![5u8; 3 << 20];
     let (_src, path) = write_file("big.bin", &content);
-    let root = a
-        .node
-        .share_file(&path, &[b.node.peer_id()])
-        .await
-        .unwrap()
-        .root;
+    let root = a.node.share_file(&path, &[b.node.peer_id()]).await.unwrap();
     a.node.allow(b.node.peer_id()).unwrap();
     b.node.fetch(a.node.peer_id(), root).await.unwrap();
     let store_dir = b._dir.path().join("blobs");
     let fetched = disk_usage(&store_dir);
 
     // Several collection runs: the unexported share must survive them.
-    tokio::time::sleep(FAST_GC * 6).await;
+    tokio::time::sleep(FAST_GC.gc_interval * 6).await;
     let out = TempDir::new().unwrap();
     b.node.export(root, out.path()).await.unwrap();
     assert_eq!(std::fs::read(out.path().join("big.bin")).unwrap(), content);
@@ -783,7 +731,7 @@ async fn a_received_share_is_kept_until_exported_then_freed() {
 #[tokio::test]
 async fn garbage_collection_keeps_our_shares_and_never_touches_shared_files() {
     let lookup = MemoryLookup::new();
-    let a = node_with_gc(&lookup, FAST_GC).await;
+    let a = node_with(&lookup, FAST_GC).await;
     let b = offline_node(&lookup).await;
     // A big file is referenced in place, a small one is copied into the store.
     let src = TempDir::new().unwrap();
@@ -792,14 +740,9 @@ async fn garbage_collection_keeps_our_shares_and_never_touches_shared_files() {
     let big: Vec<u8> = (0..3 << 20).map(|i: u32| (i % 251) as u8).collect();
     std::fs::write(d.join("big.bin"), &big).unwrap();
     std::fs::write(d.join("small.txt"), b"small").unwrap();
-    let root = a
-        .node
-        .share_folder(&d, &[b.node.peer_id()])
-        .await
-        .unwrap()
-        .root;
+    let root = a.node.share_folder(&d, &[b.node.peer_id()]).await.unwrap();
 
-    tokio::time::sleep(FAST_GC * 6).await;
+    tokio::time::sleep(FAST_GC.gc_interval * 6).await;
 
     assert_eq!(std::fs::read(d.join("big.bin")).unwrap(), big);
     a.node.allow(b.node.peer_id()).unwrap();
@@ -843,7 +786,7 @@ async fn an_unexported_share_survives_a_restart_and_collection() {
     let b = start().await.unwrap();
     lookup.add_endpoint_info(b.router.endpoint().addr());
     let (_src, path) = write_file("big.bin", &vec![6u8; 1 << 20]);
-    let root = a.node.share_file(&path, &[b.peer_id()]).await.unwrap().root;
+    let root = a.node.share_file(&path, &[b.peer_id()]).await.unwrap();
     a.node.allow(b.peer_id()).unwrap();
     b.fetch(a.node.peer_id(), root).await.unwrap();
     b.shutdown().await.unwrap();
@@ -851,7 +794,7 @@ async fn an_unexported_share_survives_a_restart_and_collection() {
     a.node.shutdown().await.unwrap();
 
     let b = start().await.unwrap();
-    tokio::time::sleep(FAST_GC * 6).await;
+    tokio::time::sleep(FAST_GC.gc_interval * 6).await;
     let out = TempDir::new().unwrap();
 
     b.export(root, out.path()).await.unwrap();
@@ -869,7 +812,7 @@ async fn node_in(dir: &Path, lookup: &MemoryLookup) -> Node {
         NodeConfig::new(dir),
         presets::Minimal,
         Some(lookup.clone()),
-        GC_INTERVAL,
+        TIMING,
     )
     .await
     .unwrap();
@@ -887,8 +830,7 @@ async fn the_allow_list_survives_a_restart() {
     let root = a
         .share_file(&path, &[b.node.peer_id(), c.node.peer_id()])
         .await
-        .unwrap()
-        .root;
+        .unwrap();
     a.allow(b.node.peer_id()).unwrap();
     a.allow(c.node.peer_id()).unwrap();
     a.disallow(c.node.peer_id()).unwrap();
@@ -910,12 +852,7 @@ async fn a_fetch_that_gets_nothing_leaves_no_tag() {
     let lookup = MemoryLookup::new();
     let (a, b) = (offline_node(&lookup).await, offline_node(&lookup).await);
     let (_src, path) = write_file("x.txt", b"x");
-    let root = a
-        .node
-        .share_file(&path, &[b.node.peer_id()])
-        .await
-        .unwrap()
-        .root;
+    let root = a.node.share_file(&path, &[b.node.peer_id()]).await.unwrap();
 
     // Not allowed: the sender refuses, so nothing arrives.
     let refused = tokio::time::timeout(
@@ -960,12 +897,7 @@ async fn a_stranger_gets_a_control_answer_but_no_blobs() {
     let lookup = MemoryLookup::new();
     let (a, b) = (offline_node(&lookup).await, offline_node(&lookup).await);
     let (_src, path) = write_file("hello.txt", b"hello");
-    let root = a
-        .node
-        .share_file(&path, &[b.node.peer_id()])
-        .await
-        .unwrap()
-        .root;
+    let root = a.node.share_file(&path, &[b.node.peer_id()]).await.unwrap();
     let request = control::ControlMsg::ContactRequest {
         token: crate::contacts::InviteToken::random(),
         name: "B".into(),
@@ -1047,16 +979,8 @@ async fn an_invite_makes_two_devices_mutual_contacts() {
     let (_sa, pa) = write_file("from-a.txt", b"a");
     let (_sb, pb) = write_file("from-b.txt", b"b");
     let (root_a, root_b) = (
-        a.node
-            .share_file(&pa, &[b.node.peer_id()])
-            .await
-            .unwrap()
-            .root,
-        b.node
-            .share_file(&pb, &[a.node.peer_id()])
-            .await
-            .unwrap()
-            .root,
+        a.node.share_file(&pa, &[b.node.peer_id()]).await.unwrap(),
+        b.node.share_file(&pb, &[a.node.peer_id()]).await.unwrap(),
     );
 
     let code = a.node.create_invite("Alice").unwrap();
@@ -1092,8 +1016,7 @@ async fn an_invite_works_only_once() {
         .node
         .share_file(&path, &[b.node.peer_id(), c.node.peer_id()])
         .await
-        .unwrap()
-        .root;
+        .unwrap();
     let code = a.node.create_invite("Alice").unwrap();
     b.node.redeem_invite(&code, "Bob").await.unwrap();
 
@@ -1163,7 +1086,7 @@ async fn contacts_survive_a_restart_and_removal_refuses_them() {
     let a = node_in(dir.path(), &lookup).await;
     let b = offline_node(&lookup).await;
     let (_src, path) = write_file("x.txt", b"x");
-    let root = a.share_file(&path, &[b.node.peer_id()]).await.unwrap().root;
+    let root = a.share_file(&path, &[b.node.peer_id()]).await.unwrap();
     let code = a.create_invite("Alice").unwrap();
     b.node.redeem_invite(&code, "Bob").await.unwrap();
     a.shutdown().await.unwrap();
@@ -1176,11 +1099,7 @@ async fn contacts_survive_a_restart_and_removal_refuses_them() {
 
     assert!(a.contacts().unwrap().is_empty());
     let (_src2, path2) = write_file("y.txt", b"y");
-    let root2 = a
-        .share_file(&path2, &[b.node.peer_id()])
-        .await
-        .unwrap()
-        .root;
+    let root2 = a.share_file(&path2, &[b.node.peer_id()]).await.unwrap();
     assert!(!can_fetch(&b.node, &a, root2).await);
     a.shutdown().await.unwrap();
     b.node.shutdown().await.unwrap();
@@ -1238,18 +1157,8 @@ async fn two_shares() -> (TestNode, TestNode, TestNode, ContentHash, ContentHash
     a.node.allow(c.node.peer_id()).unwrap();
     let (_sx, px) = write_file("x.txt", b"for b");
     let (_sy, py) = write_file("y.txt", b"for c");
-    let x = a
-        .node
-        .share_file(&px, &[b.node.peer_id()])
-        .await
-        .unwrap()
-        .root;
-    let y = a
-        .node
-        .share_file(&py, &[c.node.peer_id()])
-        .await
-        .unwrap()
-        .root;
+    let x = a.node.share_file(&px, &[b.node.peer_id()]).await.unwrap();
+    let y = a.node.share_file(&py, &[c.node.peer_id()]).await.unwrap();
     (a, b, c, x, y)
 }
 
@@ -1294,12 +1203,7 @@ async fn a_file_is_never_read_as_a_list() {
     let (a, b, c, _, y) = two_shares().await;
     let file_y = file_hash(&a.node, y).await;
     let (_src, path) = write_file("innocent.bin", file_y.as_bytes());
-    let x = a
-        .node
-        .share_file(&path, &[b.node.peer_id()])
-        .await
-        .unwrap()
-        .root;
+    let x = a.node.share_file(&path, &[b.node.peer_id()]).await.unwrap();
     let file_x = file_hash(&a.node, x).await;
     let conn = blob_conn(&b.node, &a.node).await;
 
@@ -1374,12 +1278,7 @@ async fn sharing_again_adds_a_recipient() {
     assert_eq!(collection.len(), 1);
     let (_src, path) = write_file("x.txt", b"for b");
 
-    let again = a
-        .node
-        .share_file(&path, &[c.node.peer_id()])
-        .await
-        .unwrap()
-        .root;
+    let again = a.node.share_file(&path, &[c.node.peer_id()]).await.unwrap();
 
     assert_eq!(again, x);
     assert!(can_fetch(&c.node, &a.node, x).await);
@@ -1398,7 +1297,7 @@ async fn shares_and_their_recipients_survive_a_restart() {
     a.allow(b.node.peer_id()).unwrap();
     a.allow(c.node.peer_id()).unwrap();
     let (_src, path) = write_file("x.txt", b"for b");
-    let root = a.share_file(&path, &[b.node.peer_id()]).await.unwrap().root;
+    let root = a.share_file(&path, &[b.node.peer_id()]).await.unwrap();
     a.shutdown().await.unwrap();
 
     let a = node_in(dir.path(), &lookup).await;
@@ -1451,12 +1350,7 @@ async fn a_removed_contact_invited_again_does_not_get_old_shares_back() {
     let first = a.node.create_invite("Alice").unwrap();
     b.node.redeem_invite(&first, "Bob").await.unwrap();
     let (_src, path) = write_file("old.txt", b"old");
-    let old = a
-        .node
-        .share_file(&path, &[b.node.peer_id()])
-        .await
-        .unwrap()
-        .root;
+    let old = a.node.share_file(&path, &[b.node.peer_id()]).await.unwrap();
 
     a.node.remove_contact(b.node.peer_id()).unwrap();
     let again = a.node.create_invite("Alice").unwrap();
@@ -1468,8 +1362,7 @@ async fn a_removed_contact_invited_again_does_not_get_old_shares_back() {
         .node
         .share_file(&path2, &[b.node.peer_id()])
         .await
-        .unwrap()
-        .root;
+        .unwrap();
     assert!(can_fetch(&b.node, &a.node, new).await);
     a.node.shutdown().await.unwrap();
     b.node.shutdown().await.unwrap();
@@ -1481,6 +1374,19 @@ async fn befriend(a: &Node, b: &Node) {
     b.redeem_invite(&code, "B").await.unwrap();
 }
 
+/// Offers go out in the background: waits until `node`'s inbox holds `count`.
+async fn wait_for_inbox(node: &Node, count: usize) {
+    wait_for("the offer arrives", || node.inbox().unwrap().len() == count).await;
+}
+
+/// Short retries, so tests see an offer arrive after its recipient comes back.
+const FAST_RETRY: Timing = Timing {
+    retry_first: Duration::from_millis(100),
+    retry_max: Duration::from_millis(300),
+    offer_timeout: Duration::from_secs(1),
+    ..TIMING
+};
+
 #[tokio::test]
 async fn an_offer_reaches_the_inbox_and_accepting_saves_the_share() {
     let lookup = MemoryLookup::new();
@@ -1488,26 +1394,28 @@ async fn an_offer_reaches_the_inbox_and_accepting_saves_the_share() {
     befriend(&a.node, &b.node).await;
     let src = photo_tree();
 
-    let shared = a
+    let root = a
         .node
         .share_folder(&src.path().join("photos"), &[b.node.peer_id()])
         .await
         .unwrap();
 
-    assert!(shared.undelivered.is_empty());
-    let inbox = b.node.inbox().unwrap();
-    assert_eq!(inbox.len(), 1);
-    let offer = &inbox[0];
-    assert_eq!((offer.from, offer.root), (a.node.peer_id(), shared.root));
+    wait_for_inbox(&b.node, 1).await;
+    let offer = &b.node.inbox().unwrap()[0];
+    assert_eq!((offer.from, offer.root), (a.node.peer_id(), root));
     assert_eq!((offer.title.as_str(), offer.file_count), ("photos", 4));
     assert_eq!(offer.total_size, 1 + 1 + 1 + (1 << 20));
     assert_eq!(offer.preview.len(), 4);
     assert_eq!(offer.state, OfferState::New);
+    wait_for("the outbox empties", || {
+        a.node.pending_offers().unwrap().is_empty()
+    })
+    .await;
 
     let out = TempDir::new().unwrap();
     let written = b
         .node
-        .accept(a.node.peer_id(), shared.root, out.path())
+        .accept(a.node.peer_id(), root, out.path())
         .await
         .unwrap();
 
@@ -1524,15 +1432,15 @@ async fn a_declined_offer_stays_declined_and_unknown_offers_are_errors() {
     let (a, b) = (offline_node(&lookup).await, offline_node(&lookup).await);
     befriend(&a.node, &b.node).await;
     let (_src, path) = write_file("x.txt", b"x");
-    let root = a
-        .node
-        .share_file(&path, &[b.node.peer_id()])
-        .await
-        .unwrap()
-        .root;
+    let root = a.node.share_file(&path, &[b.node.peer_id()]).await.unwrap();
+    wait_for_inbox(&b.node, 1).await;
 
     b.node.decline(a.node.peer_id(), root).unwrap();
     a.node.share_file(&path, &[b.node.peer_id()]).await.unwrap();
+    wait_for("the second offer is delivered", || {
+        a.node.pending_offers().unwrap().is_empty()
+    })
+    .await;
 
     assert_eq!(b.node.inbox().unwrap()[0].state, OfferState::Declined);
     let stranger = PeerId::from([5; 32]);
@@ -1558,8 +1466,12 @@ async fn offers_from_strangers_and_hostile_offers_are_refused() {
     befriend(&a.node, &b.node).await;
     let (_src, path) = write_file("x.txt", b"x");
 
-    // C is not B's contact.
-    let from_stranger = c.node.share_file(&path, &[b.node.peer_id()]).await.unwrap();
+    // C is not B's contact: B refuses, and C stops trying instead of retrying forever.
+    c.node.share_file(&path, &[b.node.peer_id()]).await.unwrap();
+    wait_for("the refused offer is dropped", || {
+        c.node.pending_offers().unwrap().is_empty()
+    })
+    .await;
     // A is, but sends offers by hand that its own node would never make.
     let offer = |title: &str, preview: Vec<(String, u64)>| control::ControlMsg::ShareOffer {
         root: ContentHash::from([1; 32]),
@@ -1585,9 +1497,11 @@ async fn offers_from_strangers_and_hostile_offers_are_refused() {
         .request(b.node.peer_id(), &offer("x", too_long))
         .await;
 
-    assert_eq!(from_stranger.undelivered, vec![b.node.peer_id()]);
     for result in [bad_title, bad_path, long_preview] {
-        assert!(result.is_err(), "got {result:?}");
+        assert!(
+            matches!(result, Err(control::ControlError::Refused)),
+            "got {result:?}"
+        );
     }
     assert!(b.node.inbox().unwrap().is_empty());
     for n in [a, b, c] {
@@ -1609,6 +1523,7 @@ async fn a_big_folder_is_offered_with_a_short_preview() {
 
     a.node.share_folder(&d, &[b.node.peer_id()]).await.unwrap();
 
+    wait_for_inbox(&b.node, 1).await;
     let offer = &b.node.inbox().unwrap()[0];
     assert_eq!((offer.file_count, offer.total_size), (300, 300));
     assert_eq!(offer.preview.len(), PREVIEW_LEN);
@@ -1618,43 +1533,171 @@ async fn a_big_folder_is_offered_with_a_short_preview() {
 }
 
 #[tokio::test]
-async fn an_offline_recipient_is_reported_and_the_others_still_get_it() {
+async fn sharing_returns_at_once_and_offline_recipients_wait_in_the_outbox() {
     let lookup = MemoryLookup::new();
     let (a, b, c) = (
         offline_node(&lookup).await,
         offline_node(&lookup).await,
         offline_node(&lookup).await,
     );
-    let d = offline_node(&lookup).await;
     befriend(&a.node, &b.node).await;
     befriend(&a.node, &c.node).await;
-    befriend(&a.node, &d.node).await;
-    let (b_id, d_id) = (b.node.peer_id(), d.node.peer_id());
+    let b_id = b.node.peer_id();
     b.node.shutdown().await.unwrap();
-    d.node.shutdown().await.unwrap();
     let (_src, path) = write_file("x.txt", b"x");
 
     let started = std::time::Instant::now();
-    let shared = a
+    let root = a
         .node
-        .share_file(&path, &[b_id, c.node.peer_id(), d_id])
+        .share_file(&path, &[b_id, c.node.peer_id()])
         .await
         .unwrap();
 
-    // Two offline recipients are waited for at the same time, not one after the other.
     assert!(
-        started.elapsed() < OFFER_TIMEOUT * 2,
+        started.elapsed() < Duration::from_secs(1),
         "took {:?}",
         started.elapsed()
     );
-    assert_eq!(shared.undelivered, vec![b_id, d_id]);
+    wait_for_inbox(&c.node, 1).await;
+    // C's answer arrives a moment before A records it as delivered.
+    wait_for("C's offer leaves the outbox", || {
+        a.node.pending_offers().unwrap().len() == 1
+    })
+    .await;
+    let pending = a.node.pending_offers().unwrap();
+    assert_eq!(
+        (pending.len(), pending[0].to, pending[0].root),
+        (1, b_id, root)
+    );
     let out = TempDir::new().unwrap();
     c.node
-        .accept(a.node.peer_id(), shared.root, out.path())
+        .accept(a.node.peer_id(), root, out.path())
         .await
         .unwrap();
     a.node.shutdown().await.unwrap();
     c.node.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn an_offline_recipient_gets_the_offer_once_back() {
+    let lookup = MemoryLookup::new();
+    let dir = TempDir::new().unwrap();
+    let a = node_with(&lookup, FAST_RETRY).await;
+    let b = node_in(dir.path(), &lookup).await;
+    befriend(&a.node, &b).await;
+    let b_id = b.peer_id();
+    b.shutdown().await.unwrap();
+    let (_src, path) = write_file("x.txt", b"x");
+    let root = a.node.share_file(&path, &[b_id]).await.unwrap();
+    wait_for("a failed try", || {
+        a.node
+            .pending_offers()
+            .unwrap()
+            .iter()
+            .any(|p| p.attempts > 0)
+    })
+    .await;
+
+    // B comes back without contacting A: only the retry timer can deliver.
+    let b = node_in(dir.path(), &lookup).await;
+
+    wait_for_inbox(&b, 1).await;
+    assert_eq!(b.inbox().unwrap()[0].root, root);
+    wait_for("the outbox empties", || {
+        a.node.pending_offers().unwrap().is_empty()
+    })
+    .await;
+    a.node.shutdown().await.unwrap();
+    b.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn a_recipient_that_connects_gets_its_offers_without_waiting() {
+    let lookup = MemoryLookup::new();
+    let dir = TempDir::new().unwrap();
+    // Retries are far off (the real 30 s), so only the connection can trigger delivery.
+    let quick_give_up = Timing {
+        offer_timeout: Duration::from_secs(1),
+        ..TIMING
+    };
+    let a = node_with(&lookup, quick_give_up).await;
+    let b = node_in(dir.path(), &lookup).await;
+    befriend(&a.node, &b).await;
+    let b_id = b.peer_id();
+    b.shutdown().await.unwrap();
+    let (_src, path) = write_file("x.txt", b"x");
+    a.node.share_file(&path, &[b_id]).await.unwrap();
+    wait_for("a failed try", || {
+        a.node
+            .pending_offers()
+            .unwrap()
+            .iter()
+            .any(|p| p.attempts > 0)
+    })
+    .await;
+    let b = node_in(dir.path(), &lookup).await;
+
+    // Any control connection from B tells A that B is online.
+    let started = std::time::Instant::now();
+    b.request(a.node.peer_id(), &control::ControlMsg::ContactRejected)
+        .await
+        .ok();
+
+    wait_for_inbox(&b, 1).await;
+    assert!(
+        started.elapsed() < Duration::from_secs(5),
+        "took {:?}",
+        started.elapsed()
+    );
+    a.node.shutdown().await.unwrap();
+    b.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn queued_offers_go_out_when_the_sender_restarts() {
+    let lookup = MemoryLookup::new();
+    let (a_dir, b_dir) = (TempDir::new().unwrap(), TempDir::new().unwrap());
+    // Gives up on an offline peer fast, but would wait the real 30 s before retrying.
+    let quick_give_up = Timing {
+        offer_timeout: Duration::from_secs(1),
+        ..TIMING
+    };
+    let start_a = || {
+        Node::spawn_with(
+            NodeConfig::new(a_dir.path()),
+            presets::Minimal,
+            Some(lookup.clone()),
+            quick_give_up,
+        )
+    };
+    let a = start_a().await.unwrap();
+    lookup.add_endpoint_info(a.router.endpoint().addr());
+    let b = node_in(b_dir.path(), &lookup).await;
+    befriend(&a, &b).await;
+    let b_id = b.peer_id();
+    b.shutdown().await.unwrap();
+    let (_src, path) = write_file("x.txt", b"x");
+    a.share_file(&path, &[b_id]).await.unwrap();
+    wait_for("a failed try", || {
+        a.pending_offers().unwrap().iter().any(|p| p.attempts > 0)
+    })
+    .await;
+    a.shutdown().await.unwrap();
+
+    let b = node_in(b_dir.path(), &lookup).await;
+    let started = std::time::Instant::now();
+    let a = start_a().await.unwrap();
+    lookup.add_endpoint_info(a.router.endpoint().addr());
+
+    // The next try was 30 s away, but a restart tries everything at once.
+    wait_for_inbox(&b, 1).await;
+    assert!(
+        started.elapsed() < Duration::from_secs(5),
+        "took {:?}",
+        started.elapsed()
+    );
+    a.shutdown().await.unwrap();
+    b.shutdown().await.unwrap();
 }
 
 #[tokio::test]
@@ -1665,7 +1708,8 @@ async fn the_inbox_survives_a_restart() {
     let b = node_in(dir.path(), &lookup).await;
     befriend(&a.node, &b).await;
     let (_src, path) = write_file("x.txt", b"x");
-    let root = a.node.share_file(&path, &[b.peer_id()]).await.unwrap().root;
+    let root = a.node.share_file(&path, &[b.peer_id()]).await.unwrap();
+    wait_for_inbox(&b, 1).await;
     b.shutdown().await.unwrap();
 
     let b = node_in(dir.path(), &lookup).await;
@@ -1674,4 +1718,94 @@ async fn the_inbox_survives_a_restart() {
     assert_eq!((inbox.len(), inbox[0].root), (1, root));
     a.node.shutdown().await.unwrap();
     b.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn a_removed_contact_gets_none_of_the_offers_waiting_for_them() {
+    let lookup = MemoryLookup::new();
+    let dir = TempDir::new().unwrap();
+    let a = node_with(&lookup, FAST_RETRY).await;
+    let b = node_in(dir.path(), &lookup).await;
+    befriend(&a.node, &b).await;
+    let b_id = b.peer_id();
+    b.shutdown().await.unwrap();
+    let (_src, path) = write_file("secret-plans.txt", b"x");
+    a.node.share_file(&path, &[b_id]).await.unwrap();
+
+    a.node.remove_contact(b_id).unwrap();
+
+    assert!(a.node.pending_offers().unwrap().is_empty());
+    let b = node_in(dir.path(), &lookup).await;
+    // Several retry rounds pass (100-300 ms each): nothing may arrive.
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+    assert!(b.inbox().unwrap().is_empty());
+    a.node.shutdown().await.unwrap();
+    b.shutdown().await.unwrap();
+}
+
+/// A stand-in peer that cancels every control request with `code`.
+#[derive(Debug)]
+struct Cancels(u32);
+
+impl iroh::protocol::ProtocolHandler for Cancels {
+    async fn accept(
+        &self,
+        conn: iroh::endpoint::Connection,
+    ) -> Result<(), iroh::protocol::AcceptError> {
+        while let Ok((mut tx, mut rx)) = conn.accept_bi().await {
+            rx.read_to_end(1 << 20).await.ok();
+            tx.reset(self.0.into()).ok();
+        }
+        Ok(())
+    }
+}
+
+/// Starts a [`Cancels`] peer reachable through `lookup`.
+async fn cancelling_peer(lookup: &MemoryLookup, code: u32) -> (Router, PeerId) {
+    let endpoint = Endpoint::builder(presets::Minimal)
+        .address_lookup(lookup.clone())
+        .bind()
+        .await
+        .unwrap();
+    lookup.add_endpoint_info(endpoint.addr());
+    let id = endpoint.id().into();
+    let router = Router::builder(endpoint)
+        .accept(control::CONTROL_ALPN, Cancels(code))
+        .spawn();
+    (router, id)
+}
+
+#[tokio::test]
+async fn try_later_keeps_the_offer_and_a_refusal_drops_it() {
+    let lookup = MemoryLookup::new();
+    let a = node_with(&lookup, FAST_RETRY).await;
+    // 1 = refused, 2 = try later (the receiver's own database failed).
+    let (refuser, refused_id) = cancelling_peer(&lookup, 1).await;
+    let (busy, busy_id) = cancelling_peer(&lookup, 2).await;
+    let (_src, path) = write_file("x.txt", b"x");
+
+    a.node
+        .share_file(&path, &[refused_id, busy_id])
+        .await
+        .unwrap();
+
+    wait_for("the busy peer was tried twice", || {
+        a.node
+            .pending_offers()
+            .unwrap()
+            .iter()
+            .any(|p| p.to == busy_id && p.attempts >= 2)
+    })
+    .await;
+    let waiting: Vec<_> = a
+        .node
+        .pending_offers()
+        .unwrap()
+        .iter()
+        .map(|p| p.to)
+        .collect();
+    assert_eq!(waiting, vec![busy_id]);
+    a.node.shutdown().await.unwrap();
+    refuser.shutdown().await.unwrap();
+    busy.shutdown().await.unwrap();
 }

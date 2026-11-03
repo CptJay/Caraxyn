@@ -6,16 +6,18 @@
 use std::{sync::Arc, time::Duration};
 
 use iroh::{
-    endpoint::{Connection, ReadToEndError, RecvStream, SendStream, VarInt},
+    endpoint::{Connection, ReadError, ReadToEndError, RecvStream, SendStream, VarInt},
     protocol::{AcceptError, ProtocolHandler},
 };
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
+use tokio::sync::Notify;
 use tracing::{debug, warn};
 
 use super::access::Access;
 use crate::{
     contacts::{Contact, InviteToken, check_name, now_ms},
+    error::Error,
     ids::{ContentHash, PeerId},
     safe_name,
     shares::{Offer, OfferState, PREVIEW_LEN},
@@ -32,8 +34,12 @@ const MAX_MSG: usize = 1 << 20;
 // shortcut: no test covers it (one would wait 10 s); make it a parameter if it needs one.
 const READ_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// Stream error code sent when a message is refused.
+/// Stream error code sent when a message is refused: retrying will not help.
 const REFUSED: VarInt = VarInt::from_u32(1);
+
+/// Stream error code sent when the message could not be handled right now
+/// (our own database failed): the sender should try again later.
+const TRY_LATER: VarInt = VarInt::from_u32(2);
 
 /// A control message. Only append new variants: postcard identifies them by position.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -66,6 +72,9 @@ pub(crate) enum ControlError {
     Decode,
     #[error("no complete message within 10 s")]
     TimedOut,
+    /// The other node read the message and said no (not a contact, invalid…).
+    #[error("refused by the other node")]
+    Refused,
     #[error("stream failed: {0}")]
     Stream(String),
 }
@@ -88,6 +97,10 @@ pub(crate) async fn recv(stream: &mut RecvStream) -> Result<ControlMsg, ControlE
         .map_err(|_| ControlError::TimedOut)?
         .map_err(|e| match e {
             ReadToEndError::TooLong => ControlError::TooLarge,
+            // Told apart from a network failure: retrying a refusal never helps.
+            ReadToEndError::Read(ReadError::Reset(code)) if code == REFUSED => {
+                ControlError::Refused
+            }
             e => stream_err(e),
         })?;
     let (msg, rest) = postcard::take_from_bytes(&bytes).map_err(|_| ControlError::Decode)?;
@@ -102,12 +115,20 @@ pub(crate) async fn recv(stream: &mut RecvStream) -> Result<ControlMsg, ControlE
 #[derive(Clone, Debug)]
 pub(crate) struct ControlHandler {
     pub(super) access: Arc<Access>,
+    /// Woken when a peer with offers waiting for it shows up.
+    pub(super) postman: Arc<Notify>,
 }
 
 impl ProtocolHandler for ControlHandler {
     async fn accept(&self, conn: Connection) -> Result<(), AcceptError> {
         // Proven by the connection's encryption, so it cannot be faked.
         let peer = PeerId::from(conn.remote_id());
+        // A peer that connects is online: send what waits for it now, not at the next retry.
+        match self.access.db().offer_due_now(peer) {
+            Ok(true) => self.postman.notify_one(),
+            Ok(false) => {}
+            Err(e) => warn!(peer = %peer.short(), %e, "could not check the outbox"),
+        }
         // One stream per request, until the other side closes the connection.
         while let Ok((mut tx, mut rx)) = conn.accept_bi().await {
             let access = Arc::clone(&self.access);
@@ -117,17 +138,17 @@ impl ProtocolHandler for ControlHandler {
                     Ok(msg) => answer(&access, peer, msg),
                     Err(e) => {
                         debug!(peer = %peer.short(), %e, "bad control message");
-                        None
+                        Err(REFUSED)
                     }
                 };
                 match answer {
-                    Some(answer) => {
+                    Ok(answer) => {
                         if let Err(e) = send(&mut tx, &answer).await {
                             debug!(peer = %peer.short(), %e, "could not answer");
                         }
                     }
                     // Fails only this stream; the connection keeps working.
-                    None => drop(tx.reset(REFUSED)),
+                    Err(code) => drop(tx.reset(code)),
                 }
             });
         }
@@ -135,8 +156,8 @@ impl ProtocolHandler for ControlHandler {
     }
 }
 
-/// The answer to a request from `peer`, or `None` to refuse it.
-fn answer(access: &Access, peer: PeerId, msg: ControlMsg) -> Option<ControlMsg> {
+/// The answer to a request from `peer`, or the code to cancel its stream with.
+fn answer(access: &Access, peer: PeerId, msg: ControlMsg) -> Result<ControlMsg, VarInt> {
     match msg {
         ControlMsg::ContactRequest { token, name } => {
             // Never says why: a stranger must not learn which tokens exist.
@@ -153,7 +174,7 @@ fn answer(access: &Access, peer: PeerId, msg: ControlMsg) -> Option<ControlMsg> 
                         false
                     })
             };
-            Some(if accepted {
+            Ok(if accepted {
                 ControlMsg::ContactAccepted
             } else {
                 ControlMsg::ContactRejected
@@ -176,19 +197,21 @@ fn answer(access: &Access, peer: PeerId, msg: ControlMsg) -> Option<ControlMsg> 
                 received_at: now_ms(),
                 state: OfferState::New,
             };
+            // Our own trouble is not a refusal: the sender keeps the offer and retries.
+            let try_later = |e: Error| {
+                warn!(peer = %peer.short(), %e, "could not take an offer");
+                TRY_LATER
+            };
             // Only contacts may offer, so strangers cannot fill the inbox.
-            let saved = offer_is_valid(&offer)
-                && access.db().is_contact(peer).unwrap_or(false)
-                && access
-                    .db()
-                    .receive_offer(&offer)
-                    .inspect_err(|e| warn!(peer = %peer.short(), %e, "could not save an offer"))
-                    .is_ok();
-            saved.then_some(ControlMsg::OfferReceived)
+            if !offer_is_valid(&offer) || !access.db().is_contact(peer).map_err(try_later)? {
+                return Err(REFUSED);
+            }
+            access.db().receive_offer(&offer).map_err(try_later)?;
+            Ok(ControlMsg::OfferReceived)
         }
         // Answers are never valid requests.
         ControlMsg::ContactAccepted | ControlMsg::ContactRejected | ControlMsg::OfferReceived => {
-            None
+            Err(REFUSED)
         }
     }
 }

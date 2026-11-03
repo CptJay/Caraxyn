@@ -33,6 +33,7 @@ use iroh_blobs::{
         fs::{FsStore, options::Options},
     },
 };
+use tokio::sync::{Notify, watch};
 use tracing::{info, warn};
 
 use crate::{
@@ -43,14 +44,29 @@ use crate::{
     error::Error,
     ids::{ContentHash, PeerId},
     safe_name,
-    shares::{Offer, OfferState, PREVIEW_LEN, Shared},
+    shares::{Offer, OfferState, PREVIEW_LEN},
 };
 
-/// How long one recipient may take to accept an offer before it counts as undelivered.
-const OFFER_TIMEOUT: Duration = Duration::from_secs(15);
+/// Background timing; tests use shorter values to see things happen.
+#[derive(Clone, Copy, Debug)]
+struct Timing {
+    /// How often the blob store deletes data no tag protects.
+    gc_interval: Duration,
+    /// Pause before retrying an offer the first time; doubles after each failure.
+    retry_first: Duration,
+    /// Longest pause between offer retries.
+    retry_max: Duration,
+    /// How long one recipient may take to take an offer before it counts as not reached.
+    offer_timeout: Duration,
+}
 
-/// How often the blob store deletes data no tag protects.
-const GC_INTERVAL: Duration = Duration::from_secs(5 * 60);
+/// The real timing.
+const TIMING: Timing = Timing {
+    gc_interval: Duration::from_secs(5 * 60),
+    retry_first: Duration::from_secs(30),
+    retry_max: Duration::from_secs(10 * 60),
+    offer_timeout: Duration::from_secs(15),
+};
 
 /// Tag that keeps one of our own shares (and every file in it) in the store.
 fn share_tag(root: ContentHash) -> String {
@@ -106,6 +122,11 @@ pub struct Node {
     store: Store,
     /// Who may fetch from us; everyone else is refused on connect.
     access: Arc<access::Access>,
+    timing: Timing,
+    /// Wakes the outbox task early (a new share, a recipient came online).
+    postman: Arc<Notify>,
+    /// Tells the outbox task to stop.
+    stop: Arc<watch::Sender<bool>>,
 }
 
 impl Node {
@@ -122,23 +143,23 @@ impl Node {
     /// if it cannot be read or written, or [`Error::Database`] if the
     /// database cannot be opened.
     pub async fn spawn(config: NodeConfig) -> Result<Self, Error> {
-        Self::spawn_with(config, presets::N0, None, GC_INTERVAL).await
+        Self::spawn_with(config, presets::N0, None, TIMING).await
     }
 
-    /// `lookup` and a short `gc_interval` are only used by tests: to let nodes
-    /// find each other offline, and to see garbage collection happen.
+    /// `lookup` and a shorter `timing` are only used by tests: to let nodes
+    /// find each other offline, and to see collection and retries happen.
     async fn spawn_with(
         config: NodeConfig,
         preset: impl Preset,
         lookup: Option<MemoryLookup>,
-        gc_interval: Duration,
+        timing: Timing,
     ) -> Result<Self, Error> {
         let blobs = config.data_dir.join("blobs");
         let mut options = Options::new(&blobs);
         // Deletes every blob no tag reaches. It never deletes a file shared in
         // place: only the store's own copies and its record of the file.
         options.gc = Some(GcConfig {
-            interval: gc_interval,
+            interval: timing.gc_interval,
             add_protected: None,
         });
         let store: Store = FsStore::load_with_opts(blobs.join("blobs.db"), options)
@@ -170,20 +191,27 @@ impl Node {
         );
         // Ends by itself when the router (and with it the sender) is dropped.
         tokio::spawn(run_blob_gate(Arc::clone(&access), requests));
+        let postman = Arc::new(Notify::new());
         let router = Router::builder(endpoint)
             .accept(iroh_blobs::ALPN, BlobsProtocol::new(&store, Some(events)))
             .accept(
                 control::CONTROL_ALPN,
                 control::ControlHandler {
                     access: Arc::clone(&access),
+                    postman: Arc::clone(&postman),
                 },
             )
             .spawn();
+        let (stop, stopped) = watch::channel(false);
         let node = Self {
             router,
             store,
             access,
+            timing,
+            postman,
+            stop: Arc::new(stop),
         };
+        tokio::spawn(node.clone().run_postman(stopped));
         info!(peer = %node.peer_id().short(), "node started");
         Ok(node)
     }
@@ -254,7 +282,11 @@ impl Node {
             token: invite.token,
             name: my_name.to_owned(),
         };
-        match self.request(invite.peer, &request).await? {
+        let answer = self
+            .request(invite.peer, &request)
+            .await
+            .map_err(|e| Error::Control(e.to_string()))?;
+        match answer {
             control::ControlMsg::ContactAccepted => {
                 let contact = Contact {
                     peer: invite.peer,
@@ -295,9 +327,9 @@ impl Node {
         &self,
         peer: PeerId,
         msg: &control::ControlMsg,
-    ) -> Result<control::ControlMsg, Error> {
-        let id = EndpointId::from_bytes(peer.as_ref()).map_err(|_| Error::InvalidPeerId)?;
-        let failed = |e: &dyn std::fmt::Display| Error::Control(e.to_string());
+    ) -> Result<control::ControlMsg, control::ControlError> {
+        let failed = |e: &dyn std::fmt::Display| control::ControlError::Stream(e.to_string());
+        let id = EndpointId::from_bytes(peer.as_ref()).map_err(|e| failed(&e))?;
         let conn = self
             .router
             .endpoint()
@@ -305,8 +337,8 @@ impl Node {
             .await
             .map_err(|e| failed(&e))?;
         let (mut tx, mut rx) = conn.open_bi().await.map_err(|e| failed(&e))?;
-        control::send(&mut tx, msg).await.map_err(|e| failed(&e))?;
-        let answer = control::recv(&mut rx).await.map_err(|e| failed(&e));
+        control::send(&mut tx, msg).await?;
+        let answer = control::recv(&mut rx).await;
         conn.close(0u32.into(), b"done");
         answer
     }
@@ -361,10 +393,11 @@ impl Node {
         Ok(())
     }
 
-    /// Imports a file, shares it with `recipients` and offers it to them.
+    /// Imports a file, shares it with `recipients` and returns the share's hash.
     ///
-    /// Returns the share's hash and the recipients the offer could not reach
-    /// right now; the share is saved either way.
+    /// Each recipient is sent an offer in the background; offers to someone
+    /// offline wait and are retried until they are online (see
+    /// [`pending_offers`](Self::pending_offers)).
     ///
     /// Only recipients may fetch it, and only if they may connect at all (a
     /// contact, or [allowed](Self::allow)). Sharing the same content again adds
@@ -379,7 +412,11 @@ impl Node {
     /// [`Error::Io`] if the file does not exist, [`Error::InvalidPath`] if it
     /// has no usable name, [`Error::UnsafeName`] if a receiver could not save
     /// it under that name, [`Error::Store`] if the import fails.
-    pub async fn share_file(&self, path: &Path, recipients: &[PeerId]) -> Result<Shared, Error> {
+    pub async fn share_file(
+        &self,
+        path: &Path,
+        recipients: &[PeerId],
+    ) -> Result<ContentHash, Error> {
         // The store requires an absolute path; this also fails if the file is missing.
         let path = tokio::fs::canonicalize(path)
             .await
@@ -389,7 +426,8 @@ impl Node {
             .await
     }
 
-    /// Imports a folder, shares it with `recipients` and offers it to them.
+    /// Imports a folder, shares it with `recipients` and returns the share's
+    /// hash. Offers go out in the background, like for [`share_file`](Self::share_file).
     ///
     /// Like [`share_file`](Self::share_file): only recipients may fetch it, and
     /// files are referenced in place.
@@ -404,7 +442,11 @@ impl Node {
     /// [`Error::InvalidPath`] if a name is not UTF-8, [`Error::UnsafeName`] if
     /// a receiver could not save a name, [`Error::Store`] if an import fails.
     // shortcut: a collection only lists files, so empty folders are lost; needs a marker format to fix.
-    pub async fn share_folder(&self, path: &Path, recipients: &[PeerId]) -> Result<Shared, Error> {
+    pub async fn share_folder(
+        &self,
+        path: &Path,
+        recipients: &[PeerId],
+    ) -> Result<ContentHash, Error> {
         let root = tokio::fs::canonicalize(path)
             .await
             .map_err(Error::io(path))?;
@@ -436,7 +478,7 @@ impl Node {
         title: String,
         entries: Vec<(String, PathBuf)>,
         recipients: &[PeerId],
-    ) -> Result<Shared, Error> {
+    ) -> Result<ContentHash, Error> {
         // Refuse here what the receiver's export would refuse, before importing anything.
         for (name, _) in &entries {
             check_name(name)?;
@@ -486,7 +528,7 @@ impl Node {
         let list = HashSeq::try_from(list).map_err(Error::store)?;
         let mut hashes: Vec<ContentHash> = list.iter().map(ContentHash::from).collect();
         hashes.push(root_hash);
-        let share = self.access.add_share(
+        self.access.add_share(
             root_hash,
             db::Share {
                 recipients: recipients.to_vec(),
@@ -497,44 +539,8 @@ impl Node {
                 preview: sizes.into_iter().take(PREVIEW_LEN).collect(),
             },
         )?;
-        let undelivered = self.offer(root_hash, &share, recipients).await;
-        Ok(Shared {
-            root: root_hash,
-            undelivered,
-        })
-    }
-
-    /// Tells each recipient about the share, all at once; returns the ones it
-    /// could not reach. An offline recipient costs up to [`OFFER_TIMEOUT`].
-    // shortcut: waits for delivery and never retries; the outbox step moves this to the background and retries.
-    async fn offer(&self, root: ContentHash, share: &db::Share, to: &[PeerId]) -> Vec<PeerId> {
-        let offer = control::ControlMsg::ShareOffer {
-            root,
-            title: share.title.clone(),
-            file_count: share.file_count,
-            total_size: share.total_size,
-            preview: share.preview.clone(),
-        };
-        let sends: Vec<_> = to
-            .iter()
-            .map(|&peer| {
-                let (node, offer) = (self.clone(), offer.clone());
-                let send = tokio::spawn(async move {
-                    let answer =
-                        tokio::time::timeout(OFFER_TIMEOUT, node.request(peer, &offer)).await;
-                    matches!(answer, Ok(Ok(control::ControlMsg::OfferReceived)))
-                });
-                (peer, send)
-            })
-            .collect();
-        let mut undelivered = Vec::new();
-        for (peer, send) in sends {
-            if !matches!(send.await, Ok(true)) {
-                warn!(peer = %peer.short(), share = %root.short(), "offer not delivered");
-                undelivered.push(peer);
-            }
-        }
-        undelivered
+        self.postman.notify_one();
+        Ok(root_hash)
     }
 
     /// Every share offered to us, in any state.
@@ -710,6 +716,8 @@ impl Node {
     ///
     /// Returns [`Error::Store`] if the node does not shut down cleanly.
     pub async fn shutdown(self) -> Result<(), Error> {
+        // No receiver left only means the outbox task already ended.
+        self.stop.send(true).ok();
         // The router also shuts down the blob store (via the blobs protocol).
         self.router.shutdown().await.map_err(Error::store)?;
         info!(peer = %self.peer_id().short(), "node stopped");
@@ -792,6 +800,7 @@ mod access;
 mod control;
 mod db;
 mod key;
+mod outbox;
 
 #[cfg(test)]
 mod tests;

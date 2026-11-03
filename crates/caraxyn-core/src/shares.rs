@@ -8,14 +8,15 @@ use crate::ids::{ContentHash, PeerId};
 /// Keeps an offer for a huge folder small.
 pub const PREVIEW_LEN: usize = 200;
 
-/// The result of sharing: the share's hash, and recipients who could not be
-/// told about it right now (offline or unreachable). The share is saved either way.
+/// An offer still waiting to reach its recipient (offline, or not reached yet).
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Shared {
+pub struct PendingOffer {
+    /// Who it is for.
+    pub to: PeerId,
     /// The share's hash.
     pub root: ContentHash,
-    /// Recipients the offer could not be delivered to.
-    pub undelivered: Vec<PeerId>,
+    /// How many times delivery failed so far.
+    pub attempts: u32,
 }
 
 /// A share another device offered us, as kept in the inbox.
