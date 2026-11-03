@@ -5,3 +5,4 @@ pub mod error;
 pub mod ids;
 pub mod node;
 pub mod safe_name;
+pub mod shares;

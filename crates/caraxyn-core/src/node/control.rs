@@ -16,7 +16,9 @@ use tracing::{debug, warn};
 use super::access::Access;
 use crate::{
     contacts::{Contact, InviteToken, check_name, now_ms},
-    ids::PeerId,
+    ids::{ContentHash, PeerId},
+    safe_name,
+    shares::{Offer, OfferState, PREVIEW_LEN},
 };
 
 /// Protocol name sent when connecting. The `1` is the version: an incompatible
@@ -35,10 +37,6 @@ const REFUSED: VarInt = VarInt::from_u32(1);
 
 /// A control message. Only append new variants: postcard identifies them by position.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[expect(
-    clippy::enum_variant_names,
-    reason = "the share messages are added later"
-)]
 pub(crate) enum ControlMsg {
     /// "You invited me": the token from the invite and the sender's name.
     ContactRequest { token: InviteToken, name: String },
@@ -46,6 +44,17 @@ pub(crate) enum ControlMsg {
     ContactAccepted,
     /// The invite was refused, unknown, used or expired.
     ContactRejected,
+    /// "Here is a share for you": what the receiver's inbox shows.
+    ShareOffer {
+        root: ContentHash,
+        title: String,
+        file_count: u64,
+        total_size: u64,
+        /// The first files (at most [`PREVIEW_LEN`]) by path and size.
+        preview: Vec<(String, u64)>,
+    },
+    /// The offer is in the receiver's inbox.
+    OfferReceived,
 }
 
 /// Why a control message could not be sent or received.
@@ -150,9 +159,49 @@ fn answer(access: &Access, peer: PeerId, msg: ControlMsg) -> Option<ControlMsg> 
                 ControlMsg::ContactRejected
             })
         }
+        ControlMsg::ShareOffer {
+            root,
+            title,
+            file_count,
+            total_size,
+            preview,
+        } => {
+            let offer = Offer {
+                from: peer,
+                root,
+                title,
+                file_count,
+                total_size,
+                preview,
+                received_at: now_ms(),
+                state: OfferState::New,
+            };
+            // Only contacts may offer, so strangers cannot fill the inbox.
+            let saved = offer_is_valid(&offer)
+                && access.db().is_contact(peer).unwrap_or(false)
+                && access
+                    .db()
+                    .receive_offer(&offer)
+                    .inspect_err(|e| warn!(peer = %peer.short(), %e, "could not save an offer"))
+                    .is_ok();
+            saved.then_some(ControlMsg::OfferReceived)
+        }
         // Answers are never valid requests.
-        ControlMsg::ContactAccepted | ControlMsg::ContactRejected => None,
+        ControlMsg::ContactAccepted | ControlMsg::ContactRejected | ControlMsg::OfferReceived => {
+            None
+        }
     }
+}
+
+/// Untrusted input: the title and every previewed path must be names we could
+/// save, and the preview no longer than an honest sender makes it.
+fn offer_is_valid(offer: &Offer) -> bool {
+    safe_name::check(&offer.title).is_ok()
+        && offer.preview.len() <= PREVIEW_LEN
+        && offer
+            .preview
+            .iter()
+            .all(|(path, _)| super::check_name(path).is_ok())
 }
 
 #[cfg(test)]

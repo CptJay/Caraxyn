@@ -77,19 +77,15 @@ impl Access {
         }
     }
 
-    /// Saves a share for `recipients` (added to any it had), then indexes it.
-    pub(super) fn add_share(
-        &self,
-        root: ContentHash,
-        recipients: &[PeerId],
-        hashes: Vec<ContentHash>,
-    ) -> Result<(), Error> {
+    /// Saves a share (its recipients added to any it had), then indexes it.
+    /// Returns the share as saved.
+    pub(super) fn add_share(&self, root: ContentHash, share: Share) -> Result<Share, Error> {
         // Lock held across the save, so two calls cannot leave memory and disk disagreeing.
         let mut shares = self.shares.write().expect("share lock poisoned");
         // Disk first: if saving fails, memory still matches what is saved.
-        let share = self.db.add_share(root, recipients, hashes)?;
-        shares.add(root, share);
-        Ok(())
+        let saved = self.db.add_share(root, share)?;
+        shares.add(root, saved.clone());
+        Ok(saved)
     }
 
     pub(super) fn db(&self) -> &Db {

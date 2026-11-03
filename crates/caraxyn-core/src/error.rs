@@ -52,6 +52,9 @@ pub enum Error {
     /// The other device refused the invite: unknown, already used or expired.
     #[error("the invite was refused (it may be used or expired)")]
     ContactRejected,
+    /// There is no such offer in the inbox.
+    #[error("no such offer in the inbox")]
+    UnknownOffer,
     /// A control message to another node could not be sent or answered.
     // shortcut: message only, like Store; split into variants when callers need to match.
     #[error("control message failed: {0}")]

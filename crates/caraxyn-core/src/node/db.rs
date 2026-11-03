@@ -8,6 +8,7 @@ use crate::{
     contacts::{Contact, InviteToken, check_invite},
     error::Error,
     ids::{ContentHash, PeerId},
+    shares::{Offer, OfferState},
 };
 
 use serde::{Deserialize, Serialize};
@@ -24,13 +25,33 @@ const CONTACTS: TableDefinition<&[u8; 32], &[u8]> = TableDefinition::new("contac
 /// Our shares. Key: the share's root hash; value: the [`Share`] in postcard.
 const SHARES: TableDefinition<&[u8; 32], &[u8]> = TableDefinition::new("shares");
 
-/// Who a share is for, and every hash it is made of.
+/// Offers others sent us. Key: sender id then share root; value: the [`Offer`] in postcard.
+const INBOX: TableDefinition<&[u8; 64], &[u8]> = TableDefinition::new("inbox");
+
+/// Who a share is for, every hash it is made of, and what its offer says.
+// shortcut: postcard rows have no format version, so adding a field makes older rows unreadable; add a version before the first release.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub(super) struct Share {
     /// Peers allowed to fetch it.
     pub(super) recipients: Vec<PeerId>,
     /// The root, its list of names and every file: all a recipient may ask for.
     pub(super) hashes: Vec<ContentHash>,
+    /// The shared file's or folder's name.
+    pub(super) title: String,
+    /// How many files it holds.
+    pub(super) file_count: u64,
+    /// Their total size in bytes.
+    pub(super) total_size: u64,
+    /// The first files by path and size, as sent in offers.
+    pub(super) preview: Vec<(String, u64)>,
+}
+
+/// Inbox key: sender id followed by share root.
+fn inbox_key(from: PeerId, root: ContentHash) -> [u8; 64] {
+    let mut key = [0; 64];
+    key[..32].copy_from_slice(from.as_ref());
+    key[32..].copy_from_slice(root.as_ref());
+    key
 }
 
 /// Handle to the database file.
@@ -48,6 +69,7 @@ impl Db {
         tx.open_table(INVITES).map_err(Error::database)?;
         tx.open_table(CONTACTS).map_err(Error::database)?;
         tx.open_table(SHARES).map_err(Error::database)?;
+        tx.open_table(INBOX).map_err(Error::database)?;
         tx.commit().map_err(Error::database)?;
         Ok(Self(db))
     }
@@ -159,27 +181,22 @@ impl Db {
         tx.commit().map_err(Error::database)
     }
 
-    /// Saves a share, adding `recipients` to any it already had. Returns the
-    /// share as saved.
-    pub(super) fn add_share(
-        &self,
-        root: ContentHash,
-        recipients: &[PeerId],
-        hashes: Vec<ContentHash>,
-    ) -> Result<Share, Error> {
+    /// Saves a share. Recipients it already had are kept, the new ones added.
+    /// Returns the share as saved.
+    pub(super) fn add_share(&self, root: ContentHash, mut share: Share) -> Result<Share, Error> {
         let tx = self.0.begin_write().map_err(Error::database)?;
         let share = {
             let mut table = tx.open_table(SHARES).map_err(Error::database)?;
-            let mut share: Share = match table.get(root.as_ref()).map_err(Error::database)? {
-                Some(row) => postcard::from_bytes(row.value()).map_err(Error::database)?,
-                None => Share::default(),
-            };
-            for peer in recipients {
-                if !share.recipients.contains(peer) {
-                    share.recipients.push(*peer);
+            if let Some(row) = table.get(root.as_ref()).map_err(Error::database)? {
+                let old: Share = postcard::from_bytes(row.value()).map_err(Error::database)?;
+                let mut recipients = old.recipients;
+                for peer in share.recipients {
+                    if !recipients.contains(&peer) {
+                        recipients.push(peer);
+                    }
                 }
+                share.recipients = recipients;
             }
-            share.hashes = hashes;
             let bytes = postcard::to_allocvec(&share).expect("a share always serializes");
             table
                 .insert(root.as_ref(), bytes.as_slice())
@@ -201,6 +218,72 @@ impl Db {
             Ok((ContentHash::from(*root.value()), share))
         })
         .collect()
+    }
+
+    /// Whether `peer` is a contact.
+    pub(super) fn is_contact(&self, peer: PeerId) -> Result<bool, Error> {
+        let tx = self.0.begin_read().map_err(Error::database)?;
+        let table = tx.open_table(CONTACTS).map_err(Error::database)?;
+        Ok(table.get(peer.as_ref()).map_err(Error::database)?.is_some())
+    }
+
+    /// Saves an incoming offer. An offer already in the inbox keeps its state,
+    /// so offering a declined share again does not bring it back.
+    pub(super) fn receive_offer(&self, offer: &Offer) -> Result<(), Error> {
+        let key = inbox_key(offer.from, offer.root);
+        let tx = self.0.begin_write().map_err(Error::database)?;
+        {
+            let mut table = tx.open_table(INBOX).map_err(Error::database)?;
+            if table.get(&key).map_err(Error::database)?.is_none() {
+                let bytes = postcard::to_allocvec(offer).expect("an offer always serializes");
+                table
+                    .insert(&key, bytes.as_slice())
+                    .map_err(Error::database)?;
+            }
+        }
+        tx.commit().map_err(Error::database)
+    }
+
+    /// Every offer in the inbox.
+    pub(super) fn inbox(&self) -> Result<Vec<Offer>, Error> {
+        let tx = self.0.begin_read().map_err(Error::database)?;
+        let table = tx.open_table(INBOX).map_err(Error::database)?;
+        let rows = table.iter().map_err(Error::database)?;
+        rows.map(|row| {
+            let (_, offer) = row.map_err(Error::database)?;
+            postcard::from_bytes(offer.value()).map_err(Error::database)
+        })
+        .collect()
+    }
+
+    /// Changes an offer's state. Returns false if there is no such offer.
+    pub(super) fn set_offer_state(
+        &self,
+        from: PeerId,
+        root: ContentHash,
+        state: OfferState,
+    ) -> Result<bool, Error> {
+        let key = inbox_key(from, root);
+        let tx = self.0.begin_write().map_err(Error::database)?;
+        {
+            let mut table = tx.open_table(INBOX).map_err(Error::database)?;
+            let found: Option<Offer> = table
+                .get(&key)
+                .map_err(Error::database)?
+                .map(|row| postcard::from_bytes(row.value()))
+                .transpose()
+                .map_err(Error::database)?;
+            let Some(mut offer) = found else {
+                return Ok(false);
+            };
+            offer.state = state;
+            let bytes = postcard::to_allocvec(&offer).expect("an offer always serializes");
+            table
+                .insert(&key, bytes.as_slice())
+                .map_err(Error::database)?;
+        }
+        tx.commit().map_err(Error::database)?;
+        Ok(true)
     }
 
     /// Every contact.
@@ -312,14 +395,16 @@ mod tests {
         let hashes = vec![root, ContentHash::from([8; 32])];
 
         let db = Db::open(&path).unwrap();
-        db.add_share(root, &[bob], hashes.clone()).unwrap();
-        db.add_share(root, &[carol, bob], hashes.clone()).unwrap();
+        let share = |recipients| Share {
+            recipients,
+            hashes: hashes.clone(),
+            ..Share::default()
+        };
+        db.add_share(root, share(vec![bob])).unwrap();
+        db.add_share(root, share(vec![carol, bob])).unwrap();
         drop(db);
 
-        let share = Share {
-            recipients: vec![bob, carol],
-            hashes,
-        };
+        let share = share(vec![bob, carol]);
         assert_eq!(
             Db::open(&path).unwrap().shares().unwrap(),
             vec![(root, share)]
@@ -333,9 +418,14 @@ mod tests {
         let (bob, carol) = (contact(1), contact(2));
         db.add_contact(&bob).unwrap();
         let (one, two) = (ContentHash::from([7; 32]), ContentHash::from([8; 32]));
-        db.add_share(one, &[bob.peer, carol.peer], vec![one])
+        let share = |recipients, root| Share {
+            recipients,
+            hashes: vec![root],
+            ..Share::default()
+        };
+        db.add_share(one, share(vec![bob.peer, carol.peer], one))
             .unwrap();
-        db.add_share(two, &[bob.peer], vec![two]).unwrap();
+        db.add_share(two, share(vec![bob.peer], two)).unwrap();
 
         db.remove_contact(bob.peer).unwrap();
 
@@ -346,5 +436,48 @@ mod tests {
             .map(|(root, share)| (root, share.recipients))
             .collect();
         assert_eq!(recipients, vec![(one, vec![carol.peer]), (two, vec![])]);
+    }
+
+    fn offer(from: u8, root: u8) -> Offer {
+        Offer {
+            from: PeerId::from([from; 32]),
+            root: ContentHash::from([root; 32]),
+            title: "trip".into(),
+            file_count: 1,
+            total_size: 2,
+            preview: vec![("trip/a.jpg".into(), 2)],
+            received_at: 3,
+            state: OfferState::New,
+        }
+    }
+
+    #[test]
+    fn a_repeated_offer_keeps_its_state() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("caraxyn.redb");
+        let db = Db::open(&path).unwrap();
+        db.receive_offer(&offer(1, 9)).unwrap();
+        db.receive_offer(&offer(2, 9)).unwrap();
+        assert!(
+            db.set_offer_state(offer(1, 9).from, offer(1, 9).root, OfferState::Declined)
+                .unwrap()
+        );
+        assert!(
+            !db.set_offer_state(PeerId::from([3; 32]), offer(1, 9).root, OfferState::Done)
+                .unwrap()
+        );
+
+        db.receive_offer(&offer(1, 9)).unwrap();
+        drop(db);
+
+        let inbox = Db::open(&path).unwrap().inbox().unwrap();
+        let states: Vec<_> = inbox.iter().map(|o| (o.from, o.state)).collect();
+        assert_eq!(
+            states,
+            vec![
+                (offer(1, 9).from, OfferState::Declined),
+                (offer(2, 9).from, OfferState::New)
+            ]
+        );
     }
 }
