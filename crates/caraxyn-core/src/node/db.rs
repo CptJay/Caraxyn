@@ -28,6 +28,20 @@ const SHARES: TableDefinition<&[u8; 32], &[u8]> = TableDefinition::new("shares")
 /// Offers others sent us. Key: sender id then share root; value: the [`Offer`] in postcard.
 const INBOX: TableDefinition<&[u8; 64], &[u8]> = TableDefinition::new("inbox");
 
+/// Offers we still have to deliver. Key: recipient id then share root; value:
+/// failed attempts so far and when to try next (unix ms; 0 = now).
+const OUTBOX: TableDefinition<&[u8; 64], (u32, u64)> = TableDefinition::new("outbox");
+
+/// One offer waiting in the outbox.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct OutboxEntry {
+    pub(super) to: PeerId,
+    pub(super) root: ContentHash,
+    pub(super) attempts: u32,
+    /// When to try next, in unix ms.
+    pub(super) next_try: u64,
+}
+
 /// Who a share is for, every hash it is made of, and what its offer says.
 // shortcut: postcard rows have no format version, so adding a field makes older rows unreadable; add a version before the first release.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -46,8 +60,8 @@ pub(super) struct Share {
     pub(super) preview: Vec<(String, u64)>,
 }
 
-/// Inbox key: sender id followed by share root.
-fn inbox_key(from: PeerId, root: ContentHash) -> [u8; 64] {
+/// Inbox and outbox key: the other peer's id followed by the share root.
+fn pair_key(from: PeerId, root: ContentHash) -> [u8; 64] {
     let mut key = [0; 64];
     key[..32].copy_from_slice(from.as_ref());
     key[32..].copy_from_slice(root.as_ref());
@@ -70,6 +84,7 @@ impl Db {
         tx.open_table(CONTACTS).map_err(Error::database)?;
         tx.open_table(SHARES).map_err(Error::database)?;
         tx.open_table(INBOX).map_err(Error::database)?;
+        tx.open_table(OUTBOX).map_err(Error::database)?;
         tx.commit().map_err(Error::database)?;
         Ok(Self(db))
     }
@@ -147,7 +162,8 @@ impl Db {
         tx.commit().map_err(Error::database)
     }
 
-    /// Deletes the contact, stops allowing them and takes them off every share.
+    /// Deletes the contact, stops allowing them, takes them off every share and
+    /// drops the offers still waiting for them.
     pub(super) fn remove_contact(&self, peer: PeerId) -> Result<(), Error> {
         let tx = self.0.begin_write().map_err(Error::database)?;
         {
@@ -178,13 +194,34 @@ impl Db {
             .map_err(Error::database)?
             .remove(peer.as_ref())
             .map_err(Error::database)?;
+        {
+            let mut outbox = tx.open_table(OUTBOX).map_err(Error::database)?;
+            let waiting: Vec<[u8; 64]> = outbox
+                .iter()
+                .map_err(Error::database)?
+                .filter_map(|row| row.ok().map(|(key, _)| *key.value()))
+                .filter(|key| key[..32] == *peer.as_ref())
+                .collect();
+            for key in waiting {
+                outbox.remove(&key).map_err(Error::database)?;
+            }
+        }
         tx.commit().map_err(Error::database)
     }
 
-    /// Saves a share. Recipients it already had are kept, the new ones added.
-    /// Returns the share as saved.
+    /// Saves a share and queues an offer to each of its `share.recipients`, in
+    /// one write, so a crash never leaves a share without its offers. Recipients
+    /// it already had are kept. Returns the share as saved.
     pub(super) fn add_share(&self, root: ContentHash, mut share: Share) -> Result<Share, Error> {
         let tx = self.0.begin_write().map_err(Error::database)?;
+        {
+            let mut outbox = tx.open_table(OUTBOX).map_err(Error::database)?;
+            for peer in &share.recipients {
+                outbox
+                    .insert(&pair_key(*peer, root), (0, 0))
+                    .map_err(Error::database)?;
+            }
+        }
         let share = {
             let mut table = tx.open_table(SHARES).map_err(Error::database)?;
             if let Some(row) = table.get(root.as_ref()).map_err(Error::database)? {
@@ -220,6 +257,90 @@ impl Db {
         .collect()
     }
 
+    /// One of our shares.
+    pub(super) fn share(&self, root: ContentHash) -> Result<Option<Share>, Error> {
+        let tx = self.0.begin_read().map_err(Error::database)?;
+        let table = tx.open_table(SHARES).map_err(Error::database)?;
+        let row = table.get(root.as_ref()).map_err(Error::database)?;
+        row.map(|row| postcard::from_bytes(row.value()))
+            .transpose()
+            .map_err(Error::database)
+    }
+
+    /// Every offer waiting in the outbox.
+    pub(super) fn outbox(&self) -> Result<Vec<OutboxEntry>, Error> {
+        let tx = self.0.begin_read().map_err(Error::database)?;
+        let table = tx.open_table(OUTBOX).map_err(Error::database)?;
+        let rows = table.iter().map_err(Error::database)?;
+        rows.map(|row| {
+            let (key, value) = row.map_err(Error::database)?;
+            let (key, (attempts, next_try)) = (key.value(), value.value());
+            let (to, root) = key.split_at(32);
+            Ok(OutboxEntry {
+                to: PeerId::from(<[u8; 32]>::try_from(to).expect("32 bytes")),
+                root: ContentHash::from(<[u8; 32]>::try_from(root).expect("32 bytes")),
+                attempts,
+                next_try,
+            })
+        })
+        .collect()
+    }
+
+    /// Takes an offer out of the outbox (delivered, or never deliverable).
+    pub(super) fn remove_offer(&self, to: PeerId, root: ContentHash) -> Result<(), Error> {
+        let tx = self.0.begin_write().map_err(Error::database)?;
+        tx.open_table(OUTBOX)
+            .map_err(Error::database)?
+            .remove(&pair_key(to, root))
+            .map_err(Error::database)?;
+        tx.commit().map_err(Error::database)
+    }
+
+    /// Records a failed delivery and when to try again.
+    pub(super) fn offer_failed(
+        &self,
+        to: PeerId,
+        root: ContentHash,
+        attempts: u32,
+        next_try: u64,
+    ) -> Result<(), Error> {
+        let tx = self.0.begin_write().map_err(Error::database)?;
+        {
+            let mut table = tx.open_table(OUTBOX).map_err(Error::database)?;
+            let key = pair_key(to, root);
+            // Only if still queued: it may have been delivered meanwhile.
+            if table.get(&key).map_err(Error::database)?.is_some() {
+                table
+                    .insert(&key, (attempts, next_try))
+                    .map_err(Error::database)?;
+            }
+        }
+        tx.commit().map_err(Error::database)
+    }
+
+    /// Makes every offer waiting for `to` due now. Returns whether there were any.
+    pub(super) fn offer_due_now(&self, to: PeerId) -> Result<bool, Error> {
+        let waiting: Vec<OutboxEntry> = self
+            .outbox()?
+            .into_iter()
+            .filter(|entry| entry.to == to && entry.next_try > 0)
+            .collect();
+        if waiting.is_empty() {
+            return Ok(false);
+        }
+        let tx = self.0.begin_write().map_err(Error::database)?;
+        {
+            let mut table = tx.open_table(OUTBOX).map_err(Error::database)?;
+            for entry in &waiting {
+                table
+                    .insert(&pair_key(entry.to, entry.root), (entry.attempts, 0))
+                    .map_err(Error::database)?;
+            }
+        }
+        tx.commit().map_err(Error::database)?;
+        Ok(true)
+    }
+
     /// Whether `peer` is a contact.
     pub(super) fn is_contact(&self, peer: PeerId) -> Result<bool, Error> {
         let tx = self.0.begin_read().map_err(Error::database)?;
@@ -230,7 +351,7 @@ impl Db {
     /// Saves an incoming offer. An offer already in the inbox keeps its state,
     /// so offering a declined share again does not bring it back.
     pub(super) fn receive_offer(&self, offer: &Offer) -> Result<(), Error> {
-        let key = inbox_key(offer.from, offer.root);
+        let key = pair_key(offer.from, offer.root);
         let tx = self.0.begin_write().map_err(Error::database)?;
         {
             let mut table = tx.open_table(INBOX).map_err(Error::database)?;
@@ -263,7 +384,7 @@ impl Db {
         root: ContentHash,
         state: OfferState,
     ) -> Result<bool, Error> {
-        let key = inbox_key(from, root);
+        let key = pair_key(from, root);
         let tx = self.0.begin_write().map_err(Error::database)?;
         {
             let mut table = tx.open_table(INBOX).map_err(Error::database)?;
