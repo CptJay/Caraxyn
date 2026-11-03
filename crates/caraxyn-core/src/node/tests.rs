@@ -2445,3 +2445,57 @@ async fn a_download_with_nothing_left_to_fetch_still_ends_complete() {
     a.node.shutdown().await.unwrap();
     b.node.shutdown().await.unwrap();
 }
+
+/// A stand-in sender that accepts blob requests and never answers them.
+#[derive(Debug)]
+struct Silent;
+
+impl iroh::protocol::ProtocolHandler for Silent {
+    async fn accept(
+        &self,
+        conn: iroh::endpoint::Connection,
+    ) -> Result<(), iroh::protocol::AcceptError> {
+        // Keeps every stream (and so the connection) open, sending nothing.
+        let mut held = Vec::new();
+        while let Ok(streams) = conn.accept_bi().await {
+            held.push(streams);
+        }
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn a_download_from_a_sender_that_goes_silent_gives_up() {
+    let lookup = MemoryLookup::new();
+    let quick_to_give_up = Timing {
+        stall_limit: Duration::from_secs(1),
+        ..TIMING
+    };
+    let b = node_with(&lookup, quick_to_give_up).await;
+    let endpoint = Endpoint::builder(presets::Minimal)
+        .address_lookup(lookup.clone())
+        .bind()
+        .await
+        .unwrap();
+    lookup.add_endpoint_info(endpoint.addr());
+    let silent_id = endpoint.id().into();
+    let silent = Router::builder(endpoint)
+        .accept(iroh_blobs::ALPN, Silent)
+        .spawn();
+
+    let started = std::time::Instant::now();
+    let result = tokio::time::timeout(
+        Duration::from_secs(20),
+        b.node.fetch(silent_id, ContentHash::from([3; 32])),
+    )
+    .await;
+
+    assert!(matches!(result, Ok(Err(Error::Stalled))), "got {result:?}");
+    assert!(
+        started.elapsed() < Duration::from_secs(10),
+        "took {:?}",
+        started.elapsed()
+    );
+    b.node.shutdown().await.unwrap();
+    silent.shutdown().await.unwrap();
+}

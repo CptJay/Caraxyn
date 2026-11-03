@@ -13,6 +13,13 @@ use crate::{
 
 use serde::{Deserialize, Serialize};
 
+/// The layout of the tables below. Bump it whenever a table or a stored type
+/// changes, so an older or newer data folder is refused with a clear error.
+pub(super) const FORMAT: u32 = 1;
+
+/// About the data folder itself. Key `"format"`: its [`FORMAT`].
+const META: TableDefinition<&str, u32> = TableDefinition::new("meta");
+
 /// Peers allowed to fetch from us. Key: the peer's id; no value yet.
 const ALLOWED: TableDefinition<&[u8; 32], ()> = TableDefinition::new("allowed_peers");
 
@@ -107,10 +114,38 @@ pub(super) struct Db(Database);
 // shortcut: writes run on the caller's thread (a few ms each, fine for an allow-list); move them off the async runtime when tables get busy.
 impl Db {
     /// Opens the database at `path`, creating the file and its tables if needed.
+    /// A database in another [`FORMAT`] is refused, untouched.
+    // shortcut: no migrations; a different format is refused. Add them with the first release that changes a format.
     pub(super) fn open(path: &Path) -> Result<Self, Error> {
         let db = Database::create(path).map_err(Error::database)?;
-        // Creates the tables on first open, so reads never find them missing.
         let tx = db.begin_write().map_err(Error::database)?;
+        // Checked before any other table is opened: an older layout would fail
+        // there with an unclear error.
+        let found = {
+            let fresh = tx.list_tables().map_err(Error::database)?.next().is_none();
+            let mut meta = tx.open_table(META).map_err(Error::database)?;
+            let stored = meta
+                .get("format")
+                .map_err(Error::database)?
+                .map(|row| row.value());
+            match stored {
+                Some(format) => format,
+                None if fresh => {
+                    meta.insert("format", FORMAT).map_err(Error::database)?;
+                    FORMAT
+                }
+                // Tables but no number: written before formats were numbered.
+                None => 0,
+            }
+        };
+        if found != FORMAT {
+            // Dropping the transaction leaves the file exactly as it was.
+            return Err(Error::IncompatibleData {
+                found,
+                expected: FORMAT,
+            });
+        }
+        // Creates the tables on first open, so reads never find them missing.
         tx.open_table(ALLOWED).map_err(Error::database)?;
         tx.open_table(INVITES).map_err(Error::database)?;
         tx.open_table(CONTACTS).map_err(Error::database)?;
@@ -845,5 +880,54 @@ mod tests {
                 (declined.from, OfferState::Declined, Some(42)),
             ]
         );
+    }
+
+    #[test]
+    fn a_data_folder_in_another_format_is_refused_untouched() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("caraxyn.redb");
+        // A new folder gets the current format and opens again.
+        drop(Db::open(&path).unwrap());
+        drop(Db::open(&path).unwrap());
+
+        // A newer (or older) numbered format.
+        {
+            let db = Database::create(&path).unwrap();
+            let tx = db.begin_write().unwrap();
+            tx.open_table(META).unwrap().insert("format", 99).unwrap();
+            tx.commit().unwrap();
+        }
+        let newer = Db::open(&path);
+        assert!(
+            matches!(
+                newer,
+                Err(Error::IncompatibleData {
+                    found: 99,
+                    expected: FORMAT
+                })
+            ),
+            "got {newer:?}"
+        );
+
+        // From before formats were numbered: tables, but no number.
+        let old = dir.path().join("old.redb");
+        {
+            let db = Database::create(&old).unwrap();
+            let tx = db.begin_write().unwrap();
+            tx.open_table(ALLOWED)
+                .unwrap()
+                .insert(&[1; 32], ())
+                .unwrap();
+            tx.commit().unwrap();
+        }
+        let older = Db::open(&old);
+        assert!(
+            matches!(older, Err(Error::IncompatibleData { found: 0, .. })),
+            "got {older:?}"
+        );
+        // Untouched: still no format number written.
+        let db = Database::create(&old).unwrap();
+        let tx = db.begin_read().unwrap();
+        assert!(tx.open_table(META).is_err());
     }
 }

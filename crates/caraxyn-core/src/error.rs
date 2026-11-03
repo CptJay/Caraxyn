@@ -65,6 +65,22 @@ pub enum Error {
     // shortcut: message only, like Store; split into variants when callers need to match.
     #[error("control message failed: {0}")]
     Control(String),
+    /// The data folder was written by another version of Caraxyn, whose
+    /// stored layout this version cannot read. Nothing in it was changed.
+    #[error(
+        "the data folder was written by another version of Caraxyn \
+         (data format {found}, this version reads {expected})"
+    )]
+    IncompatibleData {
+        /// The folder's format; 0 is from before formats were numbered.
+        found: u32,
+        /// The format this version reads and writes.
+        expected: u32,
+    },
+    /// A download stopped making progress, so it was given up. What arrived
+    /// is kept; fetching again continues from there.
+    #[error("the download stalled: nothing arrived for too long")]
+    Stalled,
     /// Caraxyn's own database could not be opened, read or written.
     // shortcut: message only, like Store; split into variants when callers need to match.
     #[error("database error: {0}")]
