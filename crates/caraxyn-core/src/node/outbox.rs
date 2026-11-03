@@ -10,7 +10,7 @@ use std::{
     time::Duration,
 };
 
-use tokio::sync::watch;
+use tokio::sync::{Notify, broadcast, watch};
 use tracing::{info, warn};
 
 use super::{
@@ -25,6 +25,48 @@ use crate::{
     ids::{ContentHash, PeerId},
     shares::PendingOffer,
 };
+
+/// Marks one message as being sent. When it is dropped, at the end of its
+/// delivery task or when that task panics, the message may be tried again and
+/// the postman recomputes when the next one is due.
+struct OnItsWay {
+    key: (PeerId, ContentHash),
+    in_flight: Arc<Mutex<HashSet<(PeerId, ContentHash)>>>,
+    postman: Arc<Notify>,
+}
+
+impl Drop for OnItsWay {
+    fn drop(&mut self) {
+        // A poisoned lock still holds a usable set: never leave the key stuck.
+        let mut in_flight = self.in_flight.lock().unwrap_or_else(|e| e.into_inner());
+        in_flight.remove(&self.key);
+        self.postman.notify_one();
+    }
+}
+
+/// Runs `task` again whenever it panics, after `pause`, until it ends normally.
+/// A panic is reported as a warning event.
+pub(super) async fn supervise<F, Fut>(
+    events: broadcast::Sender<Event>,
+    name: &'static str,
+    pause: Duration,
+    mut task: F,
+) where
+    F: FnMut() -> Fut,
+    Fut: Future<Output = ()> + Send + 'static,
+{
+    loop {
+        match tokio::spawn(task()).await {
+            Ok(()) => return,
+            Err(e) if e.is_panic() => {
+                warn_about(&events, name, "it crashed and is restarted");
+                tokio::time::sleep(pause).await;
+            }
+            // Cancelled: the runtime is shutting down.
+            Err(_) => return,
+        }
+    }
+}
 
 /// What came of one delivery attempt.
 enum Delivery {
@@ -113,15 +155,19 @@ impl Node {
                 continue;
             }
             in_flight.lock().expect("outbox lock poisoned").insert(key);
-            let (node, in_flight) = (self.clone(), Arc::clone(in_flight));
+            let on_its_way = OnItsWay {
+                key,
+                in_flight: Arc::clone(in_flight),
+                postman: Arc::clone(&self.postman),
+            };
+            let node = self.clone();
             tokio::spawn(async move {
+                // Dropped at the end of this task, even if it panics.
+                let _on_its_way = on_its_way;
                 let delivery = node.deliver(entry).await;
                 if let Err(e) = node.record(entry, delivery) {
                     warn_about(&node.events, "updating the outbox", e);
                 }
-                in_flight.lock().expect("outbox lock poisoned").remove(&key);
-                // The postman recomputes when the next offer is due.
-                node.postman.notify_one();
             });
         }
         Ok(next.map_or(self.timing.retry_max, |at| {
@@ -198,6 +244,56 @@ impl Node {
 mod tests {
     use super::*;
     use crate::node::TIMING;
+
+    #[tokio::test]
+    async fn a_crashed_task_is_restarted_until_it_ends_normally() {
+        use std::sync::atomic::{AtomicU32, Ordering};
+        let (events, mut listener) = broadcast::channel(8);
+        let runs = Arc::new(AtomicU32::new(0));
+        let counted = Arc::clone(&runs);
+
+        supervise(
+            events,
+            "a test task",
+            Duration::from_millis(10),
+            move || {
+                let run = counted.fetch_add(1, Ordering::SeqCst);
+                async move {
+                    assert!(run > 0, "first run crashes");
+                }
+            },
+        )
+        .await;
+
+        assert_eq!(runs.load(Ordering::SeqCst), 2);
+        assert!(matches!(
+            listener.try_recv(),
+            Ok(Event::Warning {
+                context: "a test task",
+                ..
+            })
+        ));
+    }
+
+    #[tokio::test]
+    async fn a_delivery_that_panics_still_frees_its_offer() {
+        let in_flight = Arc::new(Mutex::new(HashSet::new()));
+        let key = (PeerId::from([1; 32]), ContentHash::from([2; 32]));
+        in_flight.lock().unwrap().insert(key);
+        let on_its_way = OnItsWay {
+            key,
+            in_flight: Arc::clone(&in_flight),
+            postman: Arc::new(Notify::new()),
+        };
+
+        let task = tokio::spawn(async move {
+            let _on_its_way = on_its_way;
+            panic!("a delivery crashed");
+        });
+
+        assert!(task.await.unwrap_err().is_panic());
+        assert!(in_flight.lock().unwrap().is_empty());
+    }
 
     #[test]
     fn pauses_double_from_30_seconds_up_to_10_minutes() {

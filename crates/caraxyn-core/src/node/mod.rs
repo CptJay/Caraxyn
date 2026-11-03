@@ -60,7 +60,12 @@ struct Timing {
     retry_max: Duration,
     /// How long one recipient may take to take an offer before it counts as not reached.
     offer_timeout: Duration,
+    /// How long a download may go without anything arriving before it is given up.
+    stall_limit: Duration,
 }
+
+/// Pause before restarting a background task that crashed.
+const RESTART_PAUSE: Duration = Duration::from_secs(1);
 
 /// Longest gap between two progress events of one download.
 const PROGRESS_EVERY: Duration = Duration::from_millis(250);
@@ -71,6 +76,7 @@ const TIMING: Timing = Timing {
     retry_first: Duration::from_secs(30),
     retry_max: Duration::from_secs(10 * 60),
     offer_timeout: Duration::from_secs(15),
+    stall_limit: Duration::from_secs(60),
 };
 
 /// Tag that keeps one of our own shares (and every file in it) in the store.
@@ -224,7 +230,13 @@ impl Node {
             stop: Arc::new(stop),
             events,
         };
-        tokio::spawn(node.clone().run_postman(stopped));
+        let postman_node = node.clone();
+        tokio::spawn(outbox::supervise(
+            node.events.clone(),
+            "the outbox task",
+            RESTART_PAUSE,
+            move || postman_node.clone().run_postman(stopped.clone()),
+        ));
         info!(peer = %node.peer_id().short(), "node started");
         Ok(node)
     }
@@ -381,7 +393,7 @@ impl Node {
     ///
     /// [`Error::InvalidPeerId`] if `from` is not a valid key, [`Error::Store`]
     /// if the peer is unreachable, does not have the share, refuses us, or sends
-    /// bad data.
+    /// bad data, [`Error::Stalled`] if nothing arrives for a minute.
     // shortcut: iroh reports a refusal as a plain failed download, so it cannot be told apart yet; add Error::Refused if a caller needs it.
     pub async fn fetch(&self, from: PeerId, root: ContentHash) -> Result<(), Error> {
         self.fetch_with_total(from, root, None).await
@@ -421,7 +433,7 @@ impl Node {
             {
                 warn!(share = %root.short(), %e, "could not drop the tag of a failed fetch");
             }
-            return Err(Error::store(e));
+            return Err(e);
         }
         info!(from = %from.short(), share = %root.short(), "share fetched");
         Ok(())
@@ -434,16 +446,21 @@ impl Node {
         from: PeerId,
         root: ContentHash,
         total: Option<u64>,
-    ) -> Result<(), String> {
+    ) -> Result<(), Error> {
         let progress = |bytes| Event::Progress {
             from,
             root,
             bytes,
             total,
         };
-        let mut items = download.stream().await.map_err(|e| e.to_string())?;
+        let mut items = download.stream().await.map_err(Error::store)?;
         let (mut bytes, mut last_told) = (0, None::<Instant>);
-        while let Some(item) = items.next().await {
+        // A sender that keeps the connection open but sends nothing would
+        // otherwise be waited for forever.
+        while let Some(item) = tokio::time::timeout(self.timing.stall_limit, items.next())
+            .await
+            .map_err(|_| Error::Stalled)?
+        {
             match item {
                 DownloadProgressItem::Progress(now) => {
                     bytes = now;
@@ -453,8 +470,8 @@ impl Node {
                         last_told = Some(Instant::now());
                     }
                 }
-                DownloadProgressItem::Error(e) => return Err(e.to_string()),
-                DownloadProgressItem::DownloadError => return Err("download failed".into()),
+                DownloadProgressItem::Error(e) => return Err(Error::store(e)),
+                DownloadProgressItem::DownloadError => return Err(Error::store("download failed")),
                 _ => {}
             }
         }
