@@ -1017,7 +1017,8 @@ mod tests {
     }
 
     /// Fails when a saved row's encoding changes. If that was on purpose, bump `FORMAT`,
-    /// add its upgrade step, and only then update the bytes here.
+    /// add its upgrade step, and only then update the bytes here. Every number is too big
+    /// for a smaller type and every `Option` is filled, so narrowing a field shows here too.
     #[test]
     fn saved_rows_keep_their_bytes() {
         let hex = |bytes: Vec<u8>| bytes.iter().map(|b| format!("{b:02x}")).collect::<String>();
@@ -1027,26 +1028,26 @@ mod tests {
             recipients: vec![peer],
             hashes: vec![root],
             title: "a".into(),
-            file_count: 1,
-            total_size: 300,
-            preview: vec![("a".into(), 300)],
-            revoked_at: None,
-            expires_at: Some(5),
+            file_count: 70_000,
+            total_size: 5_000_000_000,
+            preview: vec![("a".into(), 5_000_000_000)],
+            revoked_at: Some(1_700_000_000_001),
+            expires_at: Some(1_700_000_000_002),
         };
         let contact = Contact {
             peer,
             name: "b".into(),
-            added_at: 7,
+            added_at: 1_700_000_000_003,
         };
         let offer = Offer {
             from: peer,
             root,
             title: "a".into(),
-            file_count: 1,
-            total_size: 300,
-            preview: vec![("a".into(), 300)],
-            expires_at: None,
-            received_at: 9,
+            file_count: 70_000,
+            total_size: 5_000_000_000,
+            preview: vec![("a".into(), 5_000_000_000)],
+            expires_at: Some(1_700_000_000_004),
+            received_at: 1_700_000_000_005,
             state: OfferState::Revoked,
         };
         let rows = [
@@ -1058,9 +1059,13 @@ mod tests {
         assert_eq!(
             rows,
             [
-                format!("01{peer}01{root}016101ac02010161ac02000105"),
-                format!("{peer}016207"),
-                format!("{peer}{root}016101ac02010161ac02000903"),
+                format!(
+                    "01{peer}01{root}0161f0a20480e497d01201016180e497d0120181d095ffbc310182d095ffbc31"
+                ),
+                format!("{peer}016283d095ffbc31"),
+                format!(
+                    "{peer}{root}0161f0a20480e497d01201016180e497d0120184d095ffbc3185d095ffbc3103"
+                ),
             ]
         );
     }
