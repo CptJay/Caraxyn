@@ -37,6 +37,12 @@ export function formatTimeLeft(seconds: number): string {
   return m === 0 ? `about ${h} h left` : `about ${h} h ${m} min left`;
 }
 
+/** "direct" or "via relay" for a transfer's connection; `null` while not known. */
+export const routeLabel = (direct: boolean | null): string | null =>
+  direct === null ? null : direct ? 'direct' : 'via relay';
+
+export const RELAY_HINT = "Slower: going through a relay server because a direct connection couldn't be made.";
+
 /** First 8 characters, like the core's `short()`. */
 export const shortId = (id: string): string => id.slice(0, 8);
 

@@ -101,6 +101,9 @@ pub enum Event {
         total: u64,
         /// The download ended (done, or cut off).
         finished: bool,
+        /// `true` over a direct connection, `false` only through a relay
+        /// (slower), `None` while not known.
+        direct: Option<bool>,
     },
     /// A download is under way (at most a few times per second, and once at the end).
     Progress {
@@ -112,6 +115,9 @@ pub enum Event {
         bytes: u64,
         /// The expected total, when an offer told us.
         total: Option<u64>,
+        /// `true` over a direct connection, `false` only through a relay
+        /// (slower), `None` while not known.
+        direct: Option<bool>,
     },
     /// Something went wrong in background work no caller is waiting on.
     Warning {

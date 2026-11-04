@@ -12,6 +12,8 @@ rust-version = "1.99"
 # data-encoding, n0-future, postcard, rand, redb and serde are pinned to the versions iroh
 # already pulls in, so using them ourselves builds nothing extra.
 data-encoding = "2.11.1"
+# Free disk space before a download (std cannot read it).
+fs4 = "1.1.0"
 hex = "0.4.3"
 # Pinned exactly: the iroh crates move fast and must match each other.
 iroh = "=1.4.1"

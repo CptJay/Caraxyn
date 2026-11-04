@@ -2422,6 +2422,52 @@ async fn a_refused_offer_is_announced_as_undeliverable() {
     b.node.shutdown().await.unwrap();
 }
 
+#[test]
+fn a_connection_is_direct_when_any_address_in_use_is_not_a_relay() {
+    assert_eq!(direct_from([]), None);
+    assert_eq!(direct_from([true]), Some(false));
+    assert_eq!(direct_from([true, false]), Some(true));
+}
+
+#[test]
+fn a_download_needs_room_in_the_store_and_the_folder_twice_on_one_disk() {
+    let (store, dest) = (Path::new("/store"), Path::new("/dest"));
+    let disk = |id: &str, free| Disk {
+        id: Some(id.into()),
+        free,
+    };
+
+    // One disk: the store copy and the saved copy are there together for a while.
+    assert!(enough_space(100, (store, &disk("a", 200)), (dest, &disk("a", 200))).is_ok());
+    let tight = enough_space(100, (store, &disk("a", 150)), (dest, &disk("a", 150)));
+    assert!(
+        matches!(
+            tight,
+            Err(Error::NotEnoughSpace {
+                needed: 200,
+                available: 150,
+                ..
+            })
+        ),
+        "got {tight:?}"
+    );
+
+    // Two disks: each needs room for one copy, and the error names the full one.
+    assert!(enough_space(100, (store, &disk("a", 100)), (dest, &disk("b", 100))).is_ok());
+    let full = enough_space(100, (store, &disk("a", 500)), (dest, &disk("b", 99)));
+    assert!(
+        matches!(&full, Err(Error::NotEnoughSpace { path, needed: 100, .. }) if path == dest),
+        "got {full:?}"
+    );
+
+    // Unknown disks count as different.
+    let unknown = Disk {
+        id: None,
+        free: 100,
+    };
+    assert!(enough_space(100, (store, &unknown), (dest, &unknown)).is_ok());
+}
+
 #[tokio::test]
 async fn the_sender_hears_how_a_download_of_its_share_goes() {
     let lookup = MemoryLookup::new();
@@ -2447,12 +2493,14 @@ async fn the_sender_hears_how_a_download_of_its_share_goes() {
         root: r,
         bytes,
         total,
+        direct,
         ..
     } = done
     else {
         unreachable!()
     };
     assert_eq!((to, r, total), (b.node.peer_id(), root, 3 << 20));
+    assert_eq!(direct, Some(true));
     // The file plus its small list of names.
     assert!(bytes >= 3 << 20, "sent {bytes}");
     a.node.shutdown().await.unwrap();
@@ -2487,9 +2535,12 @@ async fn accepting_reports_progress_up_to_the_whole_share() {
             root: r,
             bytes,
             total,
+            direct,
         } = event
         {
             assert_eq!((from, r, total), (a.node.peer_id(), root, Some(3 << 20)));
+            // Two nodes on this machine reach each other without a relay.
+            assert_eq!(direct, Some(true));
             seen.push(bytes);
         }
     }
