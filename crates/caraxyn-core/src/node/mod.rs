@@ -13,7 +13,10 @@ use std::{
 use iroh::{
     Endpoint, EndpointId, Watcher,
     address_lookup::MemoryLookup,
-    endpoint::presets::{self, Preset},
+    endpoint::{
+        TransportAddrUsage,
+        presets::{self, Preset},
+    },
     protocol::Router,
 };
 use iroh_blobs::{
@@ -141,6 +144,8 @@ pub struct Node {
     stop: Arc<watch::Sender<bool>>,
     /// Where [`events`](Self::events) listeners get what happens.
     events: broadcast::Sender<Event>,
+    /// The blob store's folder, for the free-space check.
+    blobs_dir: PathBuf,
 }
 
 impl Node {
@@ -207,7 +212,12 @@ impl Node {
         // Ends by itself when the router (and with it the sender) is dropped.
         let postman = Arc::new(Notify::new());
         let (events, _) = broadcast::channel(EVENT_BUFFER);
-        tokio::spawn(run_blob_gate(Arc::clone(&access), requests, events.clone()));
+        tokio::spawn(run_blob_gate(
+            Arc::clone(&access),
+            requests,
+            events.clone(),
+            endpoint.clone(),
+        ));
         let router = Router::builder(endpoint)
             .accept(
                 iroh_blobs::ALPN,
@@ -232,6 +242,7 @@ impl Node {
             postman,
             stop: Arc::new(stop),
             events,
+            blobs_dir: blobs,
         };
         tokio::spawn(watch_net_status(
             node.router.endpoint().home_relay_status(),
@@ -462,11 +473,13 @@ impl Node {
         root: ContentHash,
         total: Option<u64>,
     ) -> Result<(), Error> {
-        let progress = |bytes| Event::Progress {
+        let endpoint = self.router.endpoint();
+        let progress = async |bytes| Event::Progress {
             from,
             root,
             bytes,
             total,
+            direct: is_direct(endpoint, from).await,
         };
         let mut items = download.stream().await.map_err(Error::store)?;
         let (mut bytes, mut last_told) = (0, None::<Instant>);
@@ -481,7 +494,7 @@ impl Node {
                     bytes = now;
                     // iroh reports every chunk; a few per second is plenty for a GUI.
                     if last_told.is_none_or(|at| at.elapsed() >= PROGRESS_EVERY) {
-                        tell(&self.events, progress(bytes));
+                        tell(&self.events, progress(bytes).await);
                         last_told = Some(Instant::now());
                     }
                 }
@@ -493,7 +506,10 @@ impl Node {
         // Always one at the end, so a listener sees where it finished. Success
         // means the whole share is here, even when iroh had nothing left to fetch
         // and so reported no progress at all.
-        tell(&self.events, progress(bytes.max(total.unwrap_or(bytes))));
+        tell(
+            &self.events,
+            progress(bytes.max(total.unwrap_or(bytes))).await,
+        );
         Ok(())
     }
 
@@ -775,6 +791,12 @@ impl Node {
         if offer.state == OfferState::Revoked {
             return Err(Error::ShareRevoked);
         }
+        // shortcut: counts the whole share even when part of it is already here (a resume), so it can refuse too early on a nearly full disk; subtract what the store has if that bites.
+        enough_space(
+            offer.total_size,
+            (&self.blobs_dir, &disk(&self.blobs_dir)?),
+            (dest, &disk(dest)?),
+        )?;
         self.fetch_with_total(from, root, Some(offer.total_size))
             .await?;
         let written = self.export(root, dest).await?;
@@ -965,6 +987,7 @@ async fn run_blob_gate(
     access: Arc<access::Access>,
     mut requests: tokio::sync::mpsc::Receiver<ProviderMessage>,
     events: broadcast::Sender<Event>,
+    endpoint: Endpoint,
 ) {
     let verdict = |ok: bool| {
         if ok {
@@ -1002,7 +1025,7 @@ async fn run_blob_gate(
                 if let Some(to) = peer {
                     // A share is fetched with one request for its root: that one is the upload.
                     let total = as_list.then(|| access.share_size(hash)).flatten();
-                    let events = events.clone();
+                    let (events, endpoint) = (events.clone(), endpoint.clone());
                     let mut updates = m.rx;
                     // Every update is read to the end: iroh-blobs stops sending
                     // once nobody reads them, which would cut the download.
@@ -1025,6 +1048,7 @@ async fn run_blob_gate(
                                         bytes,
                                         total,
                                         finished,
+                                        direct: is_direct(&endpoint, to).await,
                                     },
                                 );
                                 last_told = Some(Instant::now());
@@ -1074,6 +1098,81 @@ async fn watch_net_status(
             else => return,
         }
     }
+}
+
+/// Whether the connection to `peer` is direct: `false` when only a relay
+/// carries it (slower), `None` when there is no connection to tell by.
+async fn is_direct(endpoint: &Endpoint, peer: PeerId) -> Option<bool> {
+    let id = EndpointId::from_bytes(peer.as_ref()).ok()?;
+    let info = endpoint.remote_info(id).await?;
+    direct_from(
+        info.addrs()
+            .filter(|addr| matches!(addr.usage(), TransportAddrUsage::Active))
+            .map(|addr| addr.addr().is_relay()),
+    )
+}
+
+/// From whether each address in use is a relay: direct if any is not.
+fn direct_from(active_is_relay: impl IntoIterator<Item = bool>) -> Option<bool> {
+    let mut any = false;
+    for is_relay in active_is_relay {
+        if !is_relay {
+            return Some(true);
+        }
+        any = true;
+    }
+    any.then_some(false)
+}
+
+/// The disk a folder is on, as far as free space goes.
+#[derive(Debug)]
+struct Disk {
+    /// Tells disks apart; `None` where we cannot tell, which counts as different.
+    id: Option<String>,
+    /// Bytes free for us there.
+    free: u64,
+}
+
+fn disk(path: &Path) -> Result<Disk, Error> {
+    let free = fs4::available_space(path).map_err(Error::io(path))?;
+    #[cfg(unix)]
+    let id = {
+        use std::os::unix::fs::MetadataExt;
+        let meta = std::fs::metadata(path).map_err(Error::io(path))?;
+        Some(meta.dev().to_string())
+    };
+    // The drive (`C:`, or a `\\server\share`) is the disk.
+    #[cfg(windows)]
+    let id = std::path::absolute(path).ok().and_then(|p| {
+        p.components()
+            .next()
+            .map(|c| c.as_os_str().to_string_lossy().to_lowercase())
+    });
+    #[cfg(not(any(unix, windows)))]
+    let id = None;
+    Ok(Disk { id, free })
+}
+
+/// Whether a download of `size` bytes fits. It lands in the store and is then
+/// copied to the target folder; the store copy stays until the next garbage
+/// collection, so on one shared disk it takes twice its size.
+fn enough_space(size: u64, store: (&Path, &Disk), dest: (&Path, &Disk)) -> Result<(), Error> {
+    let same_disk = store.1.id.is_some() && store.1.id == dest.1.id;
+    let needs = if same_disk {
+        vec![(dest, size.saturating_mul(2))]
+    } else {
+        vec![(store, size), (dest, size)]
+    };
+    for ((path, disk), needed) in needs {
+        if disk.free < needed {
+            return Err(Error::NotEnoughSpace {
+                path: path.to_path_buf(),
+                needed,
+                available: disk.free,
+            });
+        }
+    }
+    Ok(())
 }
 
 /// Adds up what one request we serve has sent so far, from iroh-blobs' log:

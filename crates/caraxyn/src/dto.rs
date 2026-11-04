@@ -160,12 +160,14 @@ pub enum NodeEvent {
         bytes: u64,
         total: u64,
         finished: bool,
+        direct: Option<bool>,
     },
     Progress {
         from: String,
         root: String,
         bytes: u64,
         total: Option<u64>,
+        direct: Option<bool>,
     },
     Warning {
         context: &'static str,
@@ -206,23 +208,27 @@ impl NodeEvent {
                 bytes,
                 total,
                 finished,
+                direct,
             } => Self::Upload {
                 to: to.to_string(),
                 root: root.to_string(),
                 bytes,
                 total,
                 finished,
+                direct,
             },
             Event::Progress {
                 from,
                 root,
                 bytes,
                 total,
+                direct,
             } => Self::Progress {
                 from: from.to_string(),
                 root: root.to_string(),
                 bytes,
                 total,
+                direct,
             },
             Event::Warning { context, message } => Self::Warning { context, message },
             _ => return None,
@@ -245,6 +251,7 @@ mod tests {
             root: ContentHash::from([2; 32]),
             bytes: 5,
             total: None,
+            direct: Some(false),
         };
         let value = serde_json::to_value(NodeEvent::from_core(event).unwrap()).unwrap();
         assert_eq!(
@@ -255,6 +262,7 @@ mod tests {
                 "root": "02".repeat(32),
                 "bytes": 5,
                 "total": null,
+                "direct": false,
             })
         );
     }
