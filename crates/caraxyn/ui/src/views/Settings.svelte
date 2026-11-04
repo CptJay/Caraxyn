@@ -2,7 +2,7 @@
   import PageHeader from '../components/PageHeader.svelte';
   import PathPicker from '../components/PathPicker.svelte';
   import FormSection from '../components/FormSection.svelte';
-  import type { Settings } from '../lib/api';
+  import { api, type Settings } from '../lib/api';
   import { openLogFolder, saveSettings } from '../lib/state.svelte';
 
   let { settings, dataDir, version }: { settings: Settings; dataDir: string; version: string } = $props();
@@ -27,9 +27,10 @@
     folderSaved = await saveSettings({ ...settings, downloadDir: folder });
   }
 
-  // A switch is saved at once, like the folder.
+  // A switch is saved at once, like the folder; if that fails it flips back.
   async function saveKeepRunning(e: Event) {
-    await saveSettings({ ...settings, keepRunningInTray: (e.currentTarget as HTMLInputElement).checked });
+    const box = e.currentTarget as HTMLInputElement;
+    if (!(await saveSettings({ ...settings, keepRunningInTray: box.checked }))) box.checked = !box.checked;
   }
 </script>
 
@@ -57,6 +58,8 @@
         <span class="block text-xs text-muted">Contacts can keep downloading from you and offers keep arriving.</span>
       </span>
     </label>
+    <!-- Also reachable where no tray icon shows (GNOME without AppIndicator). -->
+    <button class="btn btn-outlined" onclick={() => api.quit()}>Quit Caraxyn</button>
   </FormSection>
 
   <FormSection title="Storage">

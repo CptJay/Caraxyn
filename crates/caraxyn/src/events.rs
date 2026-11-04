@@ -1,5 +1,7 @@
 //! Forwards the node's events to the UI.
 
+use std::collections::HashSet;
+
 use caraxyn_core::{
     events::Event,
     node::Node,
@@ -17,11 +19,15 @@ pub fn forward(app: AppHandle, node: &Node) {
     let mut events = node.events();
     let node = node.clone();
     tauri::async_runtime::spawn(async move {
+        // An offer arrives again when the sender extends or re-shares it; tell only once.
+        let mut notified = HashSet::new();
         loop {
             let sent = match events.recv().await {
                 Ok(event) => match NodeEvent::from_core(event.clone()) {
                     Some(ui_event) => {
-                        if let Event::OfferReceived { offer } = &event {
+                        if let Event::OfferReceived { offer } = &event
+                            && notified.insert((offer.from, offer.root))
+                        {
                             notify_offer(&app, &node, offer);
                         }
                         app.emit("node-event", ui_event)

@@ -108,6 +108,7 @@ fn main() {
             commands::status,
             commands::save_settings,
             commands::open_log_folder,
+            commands::quit,
             commands::contacts,
             commands::create_invite,
             commands::redeem_invite,

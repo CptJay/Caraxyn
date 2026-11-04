@@ -91,6 +91,7 @@ export const api = {
   status: () => invoke<Status>('status'),
   saveSettings: (settings: Settings) => invoke<void>('save_settings', { settings }),
   openLogFolder: () => invoke<void>('open_log_folder'),
+  quit: () => invoke<void>('quit'),
 
   contacts: () => invoke<Contact[]>('contacts'),
   createInvite: () => invoke<string>('create_invite'),

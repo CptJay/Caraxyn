@@ -105,6 +105,13 @@ pub async fn open_log_folder(app: tauri::AppHandle, state: State<'_, AppState>) 
         .map_err(|e| UiError::new("Io", e.to_string()))
 }
 
+/// Stops the app, like Quit in the tray menu. Where no tray icon shows
+/// (GNOME without AppIndicator), this is the only way out besides killing it.
+#[tauri::command]
+pub fn quit(app: tauri::AppHandle) {
+    app.exit(0);
+}
+
 #[tauri::command]
 pub async fn contacts(state: State<'_, AppState>) -> Result<Vec<ContactDto>> {
     Ok(state
