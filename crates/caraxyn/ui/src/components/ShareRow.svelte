@@ -10,11 +10,13 @@
     share,
     recipients,
     onrevoke,
+    onremove,
     onexpiry,
   }: {
     share: Share;
     recipients: { peer: string; name: string; state: RecipientState; attempts: number }[];
     onrevoke: () => void;
+    onremove: () => void;
     onexpiry: (expiresAt: Millis | null) => void;
   } = $props();
 
@@ -28,9 +30,10 @@
   }
 </script>
 
-<article class={['card space-y-3', revoked && 'opacity-60']}>
+<article class="card space-y-3">
   <header class="flex items-start justify-between gap-4">
-    <div class="min-w-0">
+    <!-- Withdrawn: the details fade, the Remove button stays easy to read. -->
+    <div class={['min-w-0', revoked && 'opacity-60']}>
       <h3 class="truncate font-medium" title={share.title}>{share.title}</h3>
       <p class="text-xs text-muted">
         {share.fileCount}
@@ -43,6 +46,8 @@
         <button class="btn" onclick={() => (editing = !editing)}>Change expiry</button>
         <ConfirmButton label="Withdraw" confirmLabel="Withdraw" onconfirm={onrevoke} />
       </div>
+    {:else}
+      <ConfirmButton label="Remove" confirmLabel="Remove from list" onconfirm={onremove} />
     {/if}
   </header>
 
@@ -54,7 +59,7 @@
     </div>
   {/if}
 
-  <div class="flex flex-wrap gap-1.5">
+  <div class={['flex flex-wrap gap-1.5', revoked && 'opacity-60']}>
     {#each recipients as r (r.peer)}
       <RecipientBadge name={r.name} state={r.state} attempts={r.attempts} />
     {:else}

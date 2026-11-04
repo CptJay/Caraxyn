@@ -2,7 +2,7 @@
   import EmptyState from '../components/EmptyState.svelte';
   import ShareRow from '../components/ShareRow.svelte';
   import type { Share } from '../lib/api';
-  import { app, contactName, recipientState, revoke, setExpiry } from '../lib/state.svelte';
+  import { app, contactName, forgetShare, recipientState, revoke, setExpiry } from '../lib/state.svelte';
   import NewShare from './NewShare.svelte';
 
   let creating = $state(false);
@@ -31,6 +31,7 @@
       {share}
       recipients={recipientsOf(share)}
       onrevoke={() => revoke(share.root)}
+      onremove={() => forgetShare(share.root)}
       onexpiry={(expiresAt) => setExpiry(share.root, expiresAt)}
     />
   {:else}

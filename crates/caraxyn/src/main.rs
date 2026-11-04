@@ -95,6 +95,7 @@ fn main() {
             commands::pending_offers,
             commands::share,
             commands::revoke,
+            commands::forget_share,
             commands::set_expiry,
         ])
         .build(tauri::generate_context!())

@@ -100,6 +100,8 @@ export const api = {
   share: (path: string, recipients: PeerId[], expiresAt: Millis | null) =>
     invoke<ContentHash>('share', { path, recipients, expiresAt }),
   revoke: (root: ContentHash) => invoke<void>('revoke', { root }),
+  /** Removes a share from the list (withdrawing it first if needed). */
+  forgetShare: (root: ContentHash) => invoke<void>('forget_share', { root }),
   setExpiry: (root: ContentHash, expiresAt: Millis | null) =>
     invoke<void>('set_expiry', { root, expiresAt }),
 };

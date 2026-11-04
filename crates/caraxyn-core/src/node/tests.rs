@@ -2061,6 +2061,38 @@ async fn an_offline_recipient_gets_the_revoke_instead_of_the_offer() {
 }
 
 #[tokio::test]
+async fn a_forgotten_share_is_gone_but_its_revoke_still_arrives() {
+    let lookup = MemoryLookup::new();
+    let dir = TempDir::new().unwrap();
+    let a = node_with(&lookup, FAST_RETRY).await;
+    let b = node_in(dir.path(), &lookup).await;
+    befriend(&a.node, &b).await;
+    let b_id = b.peer_id();
+    let (_src, path) = write_file("x.txt", b"x");
+    let root = a.node.share_file(&path, &[b_id], None).await.unwrap();
+    wait_for_inbox(&b, 1).await;
+    b.shutdown().await.unwrap();
+
+    // Still active: forgetting it revokes it first.
+    a.node.forget_share(root).await.unwrap();
+
+    assert!(a.node.shares().unwrap().is_empty());
+    assert!(matches!(
+        a.node.forget_share(root).await,
+        Err(Error::UnknownShare)
+    ));
+    let b = node_in(dir.path(), &lookup).await;
+    assert!(!can_fetch(&b, &a.node, root).await);
+    wait_for("the revoke arrives", || {
+        a.node.pending_offers().unwrap().is_empty()
+    })
+    .await;
+    assert_eq!(b.inbox().unwrap()[0].state, OfferState::Revoked);
+    a.node.shutdown().await.unwrap();
+    b.shutdown().await.unwrap();
+}
+
+#[tokio::test]
 async fn only_the_one_who_offered_can_revoke() {
     let lookup = MemoryLookup::new();
     let (a, b, c) = (

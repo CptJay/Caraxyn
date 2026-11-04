@@ -206,6 +206,11 @@ pub async fn revoke(state: State<'_, AppState>, root: String) -> Result<()> {
 }
 
 #[tauri::command]
+pub async fn forget_share(state: State<'_, AppState>, root: String) -> Result<()> {
+    Ok(state.node()?.forget_share(root.parse()?).await?)
+}
+
+#[tauri::command]
 pub async fn set_expiry(
     state: State<'_, AppState>,
     root: String,

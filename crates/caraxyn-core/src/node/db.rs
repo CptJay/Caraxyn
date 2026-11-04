@@ -409,6 +409,22 @@ impl Db {
         Ok(Some(share))
     }
 
+    /// Deletes a share. Messages for it in the outbox stay. Returns the share
+    /// as it was, or `None` if there was none.
+    pub(super) fn remove_share(&self, root: ContentHash) -> Result<Option<Share>, Error> {
+        let tx = self.0.begin_write().map_err(Error::database)?;
+        let removed = tx
+            .open_table(SHARES)
+            .map_err(Error::database)?
+            .remove(root.as_ref())
+            .map_err(Error::database)?
+            .map(|row| postcard::from_bytes(row.value()))
+            .transpose()
+            .map_err(Error::database)?;
+        tx.commit().map_err(Error::database)?;
+        Ok(removed)
+    }
+
     /// Every share, by root hash.
     pub(super) fn shares(&self) -> Result<Vec<(ContentHash, Share)>, Error> {
         let tx = self.0.begin_read().map_err(Error::database)?;

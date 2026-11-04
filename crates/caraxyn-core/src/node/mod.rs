@@ -684,6 +684,26 @@ impl Node {
         }
     }
 
+    /// Removes one of our shares from the list for good. A share still active is
+    /// [revoked](Self::revoke) first; recipients not yet told of the revoke
+    /// still are. Sharing the same content again later starts afresh.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::UnknownShare`] if there is no such share, and the errors of
+    /// [`revoke`](Self::revoke).
+    pub async fn forget_share(&self, root: ContentHash) -> Result<(), Error> {
+        let share = self.access.db().share(root)?.ok_or(Error::UnknownShare)?;
+        if share.revoked_at.is_none() {
+            self.revoke(root).await?;
+        }
+        if !self.access.remove_share(root)? {
+            return Err(Error::UnknownShare);
+        }
+        info!(share = %root.short(), "share forgotten");
+        Ok(())
+    }
+
     /// Every share we made, including revoked and expired ones.
     ///
     /// # Errors

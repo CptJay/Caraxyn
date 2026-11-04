@@ -184,6 +184,13 @@ export async function revoke(root: ContentHash): Promise<void> {
   });
 }
 
+export async function forgetShare(root: ContentHash): Promise<void> {
+  await attempt(async () => {
+    await api.forgetShare(root);
+    await refreshShares();
+  });
+}
+
 export async function setExpiry(root: ContentHash, expiresAt: Millis | null): Promise<void> {
   await attempt(async () => {
     await api.setExpiry(root, expiresAt);
