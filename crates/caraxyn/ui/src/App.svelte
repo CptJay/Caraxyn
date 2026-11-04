@@ -45,7 +45,7 @@
           {:else if app.view === 'contacts'}
             <Contacts />
           {:else}
-            <Settings settings={app.status.settings} dataDir={app.status.dataDir} version={app.status.version} />
+            <Settings settings={app.status.settings} dataDir={app.status.dataDir} version={app.status.version} tray={app.status.tray} />
           {/if}
         </div>
       </main>

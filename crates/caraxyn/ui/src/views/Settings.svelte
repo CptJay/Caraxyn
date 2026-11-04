@@ -5,7 +5,12 @@
   import { api, type Settings } from '../lib/api';
   import { openLogFolder, saveSettings } from '../lib/state.svelte';
 
-  let { settings, dataDir, version }: { settings: Settings; dataDir: string; version: string } = $props();
+  let {
+    settings,
+    dataDir,
+    version,
+    tray,
+  }: { settings: Settings; dataDir: string; version: string; tray: boolean } = $props();
 
   // Edited locally and saved with the button; starts from the saved name.
   // svelte-ignore state_referenced_locally
@@ -51,13 +56,16 @@
   </FormSection>
 
   <FormSection title="General">
-    <label class="flex items-start gap-3">
-      <input type="checkbox" class="mt-0.5" checked={settings.keepRunningInTray} onchange={saveKeepRunning} />
-      <span class="space-y-0.5">
-        <span class="block text-sm font-medium">Keep running in the tray when the window is closed</span>
-        <span class="block text-xs text-muted">Contacts can keep downloading from you and offers keep arriving.</span>
-      </span>
-    </label>
+    <!-- No tray icon (Linux without AppIndicator): closing always quits. -->
+    {#if tray}
+      <label class="flex items-start gap-3">
+        <input type="checkbox" class="mt-0.5" checked={settings.keepRunningInTray} onchange={saveKeepRunning} />
+        <span class="space-y-0.5">
+          <span class="block text-sm font-medium">Keep running in the tray when the window is closed</span>
+          <span class="block text-xs text-muted">Contacts can keep downloading from you and offers keep arriving.</span>
+        </span>
+      </label>
+    {/if}
     <!-- Also reachable where no tray icon shows (GNOME without AppIndicator). -->
     <button class="btn btn-outlined" onclick={() => api.quit()}>Quit Caraxyn</button>
   </FormSection>
