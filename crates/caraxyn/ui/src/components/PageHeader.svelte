@@ -6,7 +6,7 @@
 </script>
 
 <header class="mb-4 flex h-8 items-center justify-between gap-4">
-  <h1 class="text-lg font-semibold">{title}</h1>
+  <h1 class="text-[1.375rem] leading-7 font-normal">{title}</h1>
   {#if children}
     <div class="flex gap-2">{@render children()}</div>
   {/if}

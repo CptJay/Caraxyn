@@ -1,47 +1,88 @@
 @import 'tailwindcss';
 
-/* Colors in one place; dark mode follows the OS. */
+/*
+  Material Design 3, from seed #4f46e5 (the "fidelity" scheme, so the primary
+  container is the seed itself). Generated with @material/material-color-utilities.
+  Our token names are kept; each comment names the M3 role it stands for.
+  Dark mode follows the OS.
+*/
 :root {
   /* Native controls (dropdown lists, checkboxes, scrollbars) follow the theme too. */
   color-scheme: light dark;
-  --bg: #f6f6f8;
-  --panel: #ffffff;
-  --fg: #18181b;
-  --muted: #71717a;
-  --line: #e4e4e7;
-  --accent: #4f46e5;
-  --accent-fg: #ffffff;
-  --danger: #dc2626;
-  --ok: #16a34a;
-  --warn: #d97706;
+  --bg: #fcf8ff; /* surface */
+  --panel: #f5f2ff; /* surface-container-low: cards */
+  --rail: #f0ecf9; /* surface-container: sidebar, status bar */
+  --menu: #eae6f4; /* surface-container-high: menus */
+  --fg: #1b1b24; /* on-surface */
+  --muted: #464555; /* on-surface-variant */
+  --line: #c7c4d8; /* outline-variant: dividers */
+  --outline: #777587; /* outline: field and outlined-button borders */
+  --accent: #3525cd; /* primary */
+  --accent-fg: #ffffff; /* on-primary */
+  --accent-container: #4f46e5; /* primary-container */
+  --on-accent-container: #dad7ff;
+  /* secondary-container, from the calmer tonal-spot scheme: fidelity's is too loud for every second button. */
+  --tonal: #e3e0f9; /* tonal buttons, nav indicator */
+  --on-tonal: #464559;
+  --danger: #ba1a1a; /* error */
+  --danger-fg: #ffffff;
+  --danger-container: #ffdad6;
+  --on-danger-container: #93000a;
+  /* Status colors (not M3 roles), dark enough for small text. */
+  --ok: #15803d;
+  --warn: #a15c07;
 }
 
 @media (prefers-color-scheme: dark) {
   :root {
-    --bg: #0f0f12;
-    --panel: #18181c;
-    --fg: #ececf1;
-    --muted: #9a9aa6;
-    --line: #2a2a31;
-    --accent: #818cf8;
-    --accent-fg: #0f0f12;
-    --danger: #f87171;
+    --bg: #13121b;
+    --panel: #1b1b24;
+    --rail: #1f1f28;
+    --menu: #2a2933;
+    --fg: #e4e1ee;
+    --muted: #c7c4d8;
+    --line: #464555;
+    --outline: #918fa1;
+    --accent: #c3c0ff;
+    --accent-fg: #1d00a5;
+    --accent-container: #4f46e5;
+    --on-accent-container: #dad7ff;
+    --tonal: #464559;
+    --on-tonal: #e3e0f9;
+    --danger: #ffb4ab;
+    --danger-fg: #690005;
+    --danger-container: #93000a;
+    --on-danger-container: #ffdad6;
     --ok: #4ade80;
     --warn: #fbbf24;
   }
 }
 
 @theme inline {
+  --font-sans: 'Roboto', ui-sans-serif, system-ui, sans-serif;
   --color-bg: var(--bg);
   --color-panel: var(--panel);
+  --color-rail: var(--rail);
+  --color-menu: var(--menu);
   --color-fg: var(--fg);
   --color-muted: var(--muted);
   --color-line: var(--line);
+  --color-outline: var(--outline);
   --color-accent: var(--accent);
   --color-accent-fg: var(--accent-fg);
+  --color-accent-container: var(--accent-container);
+  --color-on-accent-container: var(--on-accent-container);
+  --color-tonal: var(--tonal);
+  --color-on-tonal: var(--on-tonal);
   --color-danger: var(--danger);
+  --color-danger-fg: var(--danger-fg);
+  --color-danger-container: var(--danger-container);
+  --color-on-danger-container: var(--on-danger-container);
   --color-ok: var(--ok);
   --color-warn: var(--warn);
+  /* M3 elevation levels 1 and 2 (key + ambient shadow). */
+  --shadow-m3-1: 0 1px 2px rgb(0 0 0 / 0.3), 0 1px 3px 1px rgb(0 0 0 / 0.15);
+  --shadow-m3-2: 0 1px 2px rgb(0 0 0 / 0.3), 0 2px 6px 2px rgb(0 0 0 / 0.15);
 }
 
 html,
@@ -51,36 +92,84 @@ body,
 }
 
 body {
-  @apply bg-bg text-fg antialiased;
-  font-family: ui-sans-serif, system-ui, sans-serif;
+  @apply bg-bg font-sans text-fg antialiased;
   font-size: 14px;
+  caret-color: var(--accent);
+}
+
+/* The parts the browser draws, themed too. */
+::selection {
+  background: var(--accent-container);
+  color: var(--on-accent-container);
+}
+
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+* {
+  scrollbar-color: var(--line) transparent;
+  scrollbar-width: thin;
+}
+
+input[type='checkbox'],
+input[type='radio'] {
+  accent-color: var(--accent);
 }
 
 /* Some webviews draw option lists natively; without this the text can match the background. */
 option {
-  background-color: var(--panel);
+  background-color: var(--menu);
   color: var(--fg);
 }
 
-/* Shared button look; add `btn-primary` or `btn-danger` for the strong variants. */
+/*
+  Buttons, as M3 common buttons: pill-shaped, with a state layer (an overlay in
+  the button's own text color) that shows on hover and press.
+  `btn` is tonal; add `btn-primary` (filled), `btn-outlined` or `btn-danger` (filled, error).
+*/
 @utility btn {
-  @apply inline-flex items-center gap-1.5 rounded-md border border-line bg-panel px-3 py-1.5 text-sm font-medium hover:bg-bg disabled:cursor-not-allowed disabled:opacity-50;
+  @apply relative inline-flex h-9 shrink-0 items-center justify-center gap-1.5 overflow-hidden rounded-full bg-tonal px-4 text-sm font-medium text-on-tonal disabled:cursor-not-allowed disabled:opacity-40;
+
+  &::before {
+    content: '';
+    position: absolute;
+    inset: 0;
+    background: currentColor;
+    opacity: 0;
+    transition: opacity 150ms;
+  }
+
+  &:not(:disabled):hover::before {
+    opacity: 0.08;
+  }
+
+  &:not(:disabled):active::before {
+    opacity: 0.12;
+  }
 }
 
 @utility btn-primary {
-  @apply border-accent bg-accent text-accent-fg hover:bg-accent hover:opacity-90;
+  @apply bg-accent text-accent-fg;
+}
+
+@utility btn-outlined {
+  @apply border border-outline bg-transparent text-accent;
 }
 
 @utility btn-danger {
-  @apply border-danger text-danger;
+  @apply bg-danger text-danger-fg;
 }
 
+/* M3 elevated card. */
 @utility card {
-  @apply rounded-lg border border-line bg-panel p-4;
+  @apply rounded-xl bg-panel p-4 shadow-m3-1;
 }
 
+/* M3 outlined text field: a thicker primary border when focused, without moving anything. */
 @utility field {
-  @apply w-full rounded-md border border-line bg-panel px-3 py-1.5 text-sm outline-none focus:border-accent;
+  @apply h-10 w-full rounded border border-outline bg-transparent px-3 text-sm outline-none focus:border-accent focus:ring-1 focus:ring-accent focus:ring-inset;
 }
 
 /* Connection dot in the status bar. Colored by currentColor; .breathe makes it pulse. */

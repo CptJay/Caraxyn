@@ -37,7 +37,7 @@
 -->
 <nav
   class={[
-    'flex shrink-0 flex-col gap-1 overflow-hidden border-r border-line bg-panel p-2',
+    'flex shrink-0 flex-col gap-1 overflow-hidden bg-rail p-2',
     'transition-[width] duration-150 motion-reduce:transition-none',
     collapsed ? 'w-14' : 'w-48',
   ]}
@@ -55,7 +55,7 @@
       Caraxyn
     </p>
     <button
-      class="shrink-0 rounded-md px-3 py-2 text-muted hover:bg-bg hover:text-fg"
+      class="shrink-0 rounded-xl px-3 py-2.5 text-muted hover:bg-fg/8 hover:text-fg"
       aria-label={collapsed ? 'Expand sidebar' : 'Collapse sidebar'}
       aria-expanded={!collapsed}
       title={collapsed ? 'Expand sidebar' : 'Collapse sidebar'}
@@ -68,10 +68,10 @@
   {#each items as item (item.view)}
     <button
       class={[
-        'relative flex items-center gap-2.5 rounded-md px-3 py-2 text-left text-sm whitespace-nowrap',
+        'relative flex h-10 items-center gap-3 rounded-xl px-3 text-left text-sm font-medium whitespace-nowrap',
         // Pushed to the bottom of the bar, away from the everyday pages.
         item.view === 'settings' && 'mt-auto',
-        view === item.view ? 'bg-accent/15 font-medium text-accent' : 'hover:bg-bg',
+        view === item.view ? 'bg-tonal text-on-tonal' : 'text-muted hover:bg-fg/8 hover:text-fg',
       ]}
       aria-current={view === item.view ? 'page' : undefined}
       title={collapsed ? item.label : undefined}

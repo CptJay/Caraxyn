@@ -19,7 +19,7 @@
 {#if sorted.length === 0}
   <EmptyState title="No contacts yet" hint="Create an invite code and send it, or paste one you received." />
 {:else}
-  <ul class="divide-y divide-line rounded-lg border border-line bg-panel">
+  <ul class="divide-y divide-line overflow-hidden rounded-xl bg-panel shadow-m3-1">
     {#each sorted as contact (contact.peer)}
       <ContactRow {contact} onremove={() => removeContact(contact.peer)} />
     {/each}

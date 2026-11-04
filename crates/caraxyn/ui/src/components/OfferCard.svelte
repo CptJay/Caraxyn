@@ -37,7 +37,7 @@
         from <span class="text-fg">{sender}</span> · {formatDate(offer.receivedAt)}
       </p>
     </div>
-    <span class="shrink-0 rounded-full border border-line px-2 py-0.5 text-xs">{STATE_LABEL[offer.state]}</span>
+    <span class="inline-flex h-6 shrink-0 items-center rounded-lg border border-outline px-2 text-xs">{STATE_LABEL[offer.state]}</span>
   </header>
 
   <p class="text-xs text-muted">

@@ -8,7 +8,7 @@
 
 <div class="space-y-1">
   <div
-    class="h-1.5 overflow-hidden rounded-full bg-line"
+    class="h-1 overflow-hidden rounded-full bg-tonal"
     role="progressbar"
     aria-valuemin="0"
     aria-valuemax="100"
