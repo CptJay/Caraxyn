@@ -69,6 +69,8 @@
     <button
       class={[
         'relative flex items-center gap-2.5 rounded-md px-3 py-2 text-left text-sm whitespace-nowrap',
+        // Pushed to the bottom of the bar, away from the everyday pages.
+        item.view === 'settings' && 'mt-auto',
         view === item.view ? 'bg-accent/15 font-medium text-accent' : 'hover:bg-bg',
       ]}
       aria-current={view === item.view ? 'page' : undefined}

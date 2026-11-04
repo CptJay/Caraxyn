@@ -26,6 +26,7 @@ export interface Status {
   startupError: string | null;
   dataDir: string;
   settings: Settings;
+  version: string;
 }
 
 export interface Contact {

@@ -68,6 +68,8 @@ pub struct Status {
     startup_error: Option<String>,
     data_dir: PathBuf,
     settings: Settings,
+    /// This app's version, from its Cargo.toml.
+    version: &'static str,
 }
 
 #[tauri::command]
@@ -78,6 +80,7 @@ pub fn status(state: State<'_, AppState>) -> Status {
         startup_error: state.startup_error.as_ref().map(|e| e.message.clone()),
         data_dir: state.data_dir.clone(),
         settings: state.settings(),
+        version: env!("CARGO_PKG_VERSION"),
     }
 }
 
