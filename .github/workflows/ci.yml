@@ -20,6 +20,9 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
+      # The desktop app (Tauri) links against WebKitGTK on Linux.
+      - if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libwebkit2gtk-4.1-dev librsvg2-dev libayatana-appindicator3-dev libxdo-dev
       # rustup reads rust-toolchain.toml and installs that exact toolchain.
       - run: rustup show
       # Caches the compiled dependencies between runs (keyed on the toolchain and Cargo.lock).
@@ -31,3 +34,20 @@ jobs:
       - run: cargo doc --locked --no-deps
         env:
           RUSTDOCFLAGS: -D warnings
+
+  # The desktop app's frontend: types, lint (no `{@html}`), and that it builds.
+  ui:
+    runs-on: ubuntu-22.04
+    defaults:
+      run:
+        working-directory: crates/caraxyn/ui
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: crates/caraxyn/ui/package-lock.json
+      - run: npm ci
+      - run: npm run check
+      - run: npm run build
