@@ -14,8 +14,14 @@ use crate::{
 use serde::{Deserialize, Serialize};
 
 /// The layout of the tables below. Bump it whenever a table or a stored type
-/// changes, so an older or newer data folder is refused with a clear error.
+/// changes, with a step in [`UPGRADES`]; a newer data folder is refused with a clear error.
 pub(super) const FORMAT: u32 = 1;
+
+/// Upgrade steps: `UPGRADES[i]` turns a format `i + 1` database into format `i + 2`.
+/// Bumping [`FORMAT`] without adding its step does not compile.
+type Upgrade = fn(&WriteTransaction) -> Result<(), Error>;
+const UPGRADES: &[Upgrade] = &[];
+const _: () = assert!(UPGRADES.len() == FORMAT as usize - 1);
 
 /// About the data folder itself. Key `"format"`: its [`FORMAT`].
 const META: TableDefinition<&str, u32> = TableDefinition::new("meta");
@@ -71,7 +77,8 @@ pub(super) struct OutboxEntry {
 }
 
 /// Who a share is for, every hash it is made of, and what its offer says.
-// shortcut: postcard rows have no format version, so adding a field makes older rows unreadable; add a version before the first release.
+// Saved with postcard, which keeps no field names: changing a field means bumping
+// `FORMAT` with an upgrade step. `saved_rows_keep_their_bytes` catches a forgotten bump.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub(super) struct Share {
     /// Peers allowed to fetch it.
@@ -114,8 +121,9 @@ pub(super) struct Db(Database);
 // shortcut: writes run on the caller's thread (a few ms each, fine for an allow-list); move them off the async runtime when tables get busy.
 impl Db {
     /// Opens the database at `path`, creating the file and its tables if needed.
-    /// A database in another [`FORMAT`] is refused, untouched.
-    // shortcut: no migrations; a different format is refused. Add them with the first release that changes a format.
+    /// An older numbered format is upgraded with [`UPGRADES`], all in one write: if a step
+    /// fails, the file stays as it was. A newer format, or one from before formats were
+    /// numbered, is refused, untouched.
     pub(super) fn open(path: &Path) -> Result<Self, Error> {
         let db = Database::create(path).map_err(Error::database)?;
         let tx = db.begin_write().map_err(Error::database)?;
@@ -138,12 +146,21 @@ impl Db {
                 None => 0,
             }
         };
-        if found != FORMAT {
+        if found == 0 || found > FORMAT {
             // Dropping the transaction leaves the file exactly as it was.
             return Err(Error::IncompatibleData {
                 found,
                 expected: FORMAT,
             });
+        }
+        if found < FORMAT {
+            for step in &UPGRADES[found as usize - 1..] {
+                step(&tx)?;
+            }
+            tx.open_table(META)
+                .map_err(Error::database)?
+                .insert("format", FORMAT)
+                .map_err(Error::database)?;
         }
         // Creates the tables on first open, so reads never find them missing.
         tx.open_table(ALLOWED).map_err(Error::database)?;
@@ -997,5 +1014,54 @@ mod tests {
         let db = Database::create(&old).unwrap();
         let tx = db.begin_read().unwrap();
         assert!(tx.open_table(META).is_err());
+    }
+
+    /// Fails when a saved row's encoding changes. If that was on purpose, bump `FORMAT`,
+    /// add its upgrade step, and only then update the bytes here.
+    #[test]
+    fn saved_rows_keep_their_bytes() {
+        let hex = |bytes: Vec<u8>| bytes.iter().map(|b| format!("{b:02x}")).collect::<String>();
+        let peer = PeerId::from([1; 32]);
+        let root = ContentHash::from([2; 32]);
+        let share = Share {
+            recipients: vec![peer],
+            hashes: vec![root],
+            title: "a".into(),
+            file_count: 1,
+            total_size: 300,
+            preview: vec![("a".into(), 300)],
+            revoked_at: None,
+            expires_at: Some(5),
+        };
+        let contact = Contact {
+            peer,
+            name: "b".into(),
+            added_at: 7,
+        };
+        let offer = Offer {
+            from: peer,
+            root,
+            title: "a".into(),
+            file_count: 1,
+            total_size: 300,
+            preview: vec![("a".into(), 300)],
+            expires_at: None,
+            received_at: 9,
+            state: OfferState::Revoked,
+        };
+        let rows = [
+            hex(postcard::to_allocvec(&share).unwrap()),
+            hex(postcard::to_allocvec(&contact).unwrap()),
+            hex(postcard::to_allocvec(&offer).unwrap()),
+        ];
+        let (peer, root) = ("01".repeat(32), "02".repeat(32));
+        assert_eq!(
+            rows,
+            [
+                format!("01{peer}01{root}016101ac02010161ac02000105"),
+                format!("{peer}016207"),
+                format!("{peer}{root}016101ac02010161ac02000903"),
+            ]
+        );
     }
 }
