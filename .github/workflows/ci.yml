@@ -35,7 +35,7 @@ jobs:
         env:
           RUSTDOCFLAGS: -D warnings
 
-  # The desktop app's frontend: types, lint (no `{@html}`), and that it builds.
+  # The desktop app's frontend: types, lint (no `{@html}`), tests, and that it builds.
   ui:
     runs-on: ubuntu-22.04
     defaults:
@@ -50,4 +50,5 @@ jobs:
           cache-dependency-path: crates/caraxyn/ui/package-lock.json
       - run: npm ci
       - run: npm run check
+      - run: npm test
       - run: npm run build

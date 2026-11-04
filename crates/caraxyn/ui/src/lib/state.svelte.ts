@@ -38,7 +38,7 @@ export const app = $state({
   pending: [] as PendingOffer[],
   /** Running downloads by `pairKey(from, root)`. */
   downloads: {} as Record<string, Download>,
-  /** Offers the recipient refused, by `pairKey(to, root)`. */
+  /** Offers that will not be retried (refused, or the share expired first), by `pairKey(to, root)`. */
   // shortcut: only known for this run (the core does not keep it), so a restart shows them as delivered.
   undeliverable: {} as Record<string, true>,
   /** The last failed action, shown above the current view. */
@@ -52,7 +52,7 @@ export async function init(): Promise<void> {
     app.status = await api.status();
     if (app.status.peerId) {
       await onNodeEvent(applyEvent);
-      await onResync(() => void reload());
+      await onResync(() => inBackground(reload()));
       await reload();
     }
   } catch (e) {
@@ -72,7 +72,8 @@ export async function reload(): Promise<void> {
   ]);
 }
 
-function applyEvent(event: NodeEvent): void {
+/** Updates the lists from one node event. Exported for tests. */
+export function applyEvent(event: NodeEvent): void {
   switch (event.type) {
     case 'contactAdded':
       app.contacts = [...app.contacts.filter((c) => c.peer !== event.contact.peer), event.contact];
@@ -91,10 +92,10 @@ function applyEvent(event: NodeEvent): void {
       break;
     case 'undeliverable':
       app.undeliverable[pairKey(event.to, event.root)] = true;
-      void refreshPending();
+      inBackground(refreshShares());
       break;
     case 'delivered':
-      void refreshPending();
+      inBackground(refreshShares());
       break;
     case 'progress': {
       const key = pairKey(event.from, event.root);
@@ -107,8 +108,14 @@ function applyEvent(event: NodeEvent): void {
   }
 }
 
-async function refreshPending(): Promise<void> {
-  app.pending = await api.pendingOffers();
+/** Reads our shares and what is still waiting to reach their recipients. */
+async function refreshShares(): Promise<void> {
+  [app.shares, app.pending] = await Promise.all([api.shares(), api.pendingOffers()]);
+}
+
+/** For work no click waits on (event-driven refreshes): a failure still shows. */
+function inBackground(work: Promise<unknown>): void {
+  work.catch((e) => (app.error = errorText(e)));
 }
 
 /** Runs `action`; on failure shows its error. Returns whether it worked. */
@@ -159,21 +166,21 @@ export async function decline(offer: Offer): Promise<void> {
 export async function share(path: string, recipients: PeerId[], expiresAt: Millis | null): Promise<boolean> {
   return attempt(async () => {
     await api.share(path, recipients, expiresAt);
-    [app.shares, app.pending] = await Promise.all([api.shares(), api.pendingOffers()]);
+    await refreshShares();
   });
 }
 
 export async function revoke(root: ContentHash): Promise<void> {
   await attempt(async () => {
     await api.revoke(root);
-    [app.shares, app.pending] = await Promise.all([api.shares(), api.pendingOffers()]);
+    await refreshShares();
   });
 }
 
 export async function setExpiry(root: ContentHash, expiresAt: Millis | null): Promise<void> {
   await attempt(async () => {
     await api.setExpiry(root, expiresAt);
-    [app.shares, app.pending] = await Promise.all([api.shares(), api.pendingOffers()]);
+    await refreshShares();
   });
 }
 
@@ -196,11 +203,8 @@ export function redeemInvite(code: string): Promise<boolean> {
 export async function removeContact(peer: PeerId): Promise<void> {
   await attempt(async () => {
     await api.removeContact(peer);
-    [app.contacts, app.shares, app.pending] = await Promise.all([
-      api.contacts(),
-      api.shares(),
-      api.pendingOffers(),
-    ]);
+    app.contacts = await api.contacts();
+    await refreshShares();
   });
 }
 
@@ -215,14 +219,23 @@ export function saveSettings(settings: Settings): Promise<boolean> {
 
 export const openLogFolder = (): Promise<boolean> => attempt(api.openLogFolder);
 
+/** Copies `text`, calling `hint(true)` now and `hint(false)` a moment later, for a "Copied" label. */
+export function copyText(text: string, hint: (copied: boolean) => void): Promise<boolean> {
+  return attempt(async () => {
+    await navigator.clipboard.writeText(text);
+    hint(true);
+    setTimeout(() => hint(false), 1500);
+  });
+}
+
 /** Where an offer (or its revoke) stands for one recipient of our share. */
-export type RecipientState = 'pending' | 'delivered' | 'refused' | 'revoking' | 'revoked';
+export type RecipientState = 'pending' | 'delivered' | 'undelivered' | 'revoking' | 'revoked';
 
 export function recipientState(share: Share, peer: PeerId): { state: RecipientState; attempts: number } {
   const mail = app.pending.find((p) => p.to === peer && p.root === share.root);
   const attempts = mail?.attempts ?? 0;
   if (share.revokedAt !== null) return { state: mail?.revoke ? 'revoking' : 'revoked', attempts };
   if (mail) return { state: 'pending', attempts };
-  if (app.undeliverable[pairKey(peer, share.root)]) return { state: 'refused', attempts };
+  if (app.undeliverable[pairKey(peer, share.root)]) return { state: 'undelivered', attempts };
   return { state: 'delivered', attempts };
 }

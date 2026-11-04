@@ -23,6 +23,8 @@
   } = $props();
 
   const STATE_LABEL = { new: 'New', declined: 'Declined', done: 'Saved', revoked: 'Withdrawn' };
+  // shortcut: checked when the card renders, not as time passes; add a clock if cards stay open for hours.
+  const expired = $derived(offer.expiresAt !== null && offer.expiresAt <= Date.now());
 </script>
 
 <article class={['card space-y-3', offer.state !== 'new' && 'opacity-75']}>
@@ -49,6 +51,9 @@
       <button class="btn btn-primary" onclick={onaccept}>Accept</button>
       <button class="btn" onclick={onacceptelsewhere}>Save to…</button>
       <ConfirmButton label="Decline" confirmLabel="Decline" onconfirm={ondecline} />
+      {#if expired}
+        <p class="basis-full text-xs text-warn">Expired: the sender may no longer have it. Accept still tries.</p>
+      {/if}
     </footer>
   {/if}
 </article>

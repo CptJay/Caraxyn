@@ -6,14 +6,14 @@
   const LABEL: Record<RecipientState, string> = {
     pending: 'waiting to deliver',
     delivered: 'delivered',
-    refused: 'refused',
+    undelivered: 'not delivered',
     revoking: 'telling them it is withdrawn',
     revoked: 'withdrawn',
   };
   const COLOR: Record<RecipientState, string> = {
     pending: 'text-warn',
     delivered: 'text-ok',
-    refused: 'text-danger',
+    undelivered: 'text-danger',
     revoking: 'text-warn',
     revoked: 'text-muted',
   };

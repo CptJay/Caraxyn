@@ -85,7 +85,7 @@ cargo test --locked
 ```
 
 ```bash
-cd crates/caraxyn/ui && npm run check && npm run build
+cd crates/caraxyn/ui && npm run check && npm test && npm run build
 ```
 
 ## Your data
