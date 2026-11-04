@@ -14,6 +14,7 @@ use tauri::State;
 use tauri_plugin_opener::OpenerExt;
 
 use crate::{
+    desktop,
     dto::{ContactDto, OfferDto, PendingDto, ShareDto, net_status_name},
     error::UiError,
     settings::Settings,
@@ -35,7 +36,7 @@ impl AppState {
             .ok_or_else(|| UiError::new("NotRunning", "the node is not running"))
     }
 
-    fn settings(&self) -> Settings {
+    pub fn settings(&self) -> Settings {
         // A panic while holding the lock cannot leave settings half-written.
         self.settings
             .lock()
@@ -104,6 +105,13 @@ pub async fn open_log_folder(app: tauri::AppHandle, state: State<'_, AppState>) 
         .map_err(|e| UiError::new("Io", e.to_string()))
 }
 
+/// Stops the app, like Quit in the tray menu. Where no tray icon shows
+/// (GNOME without AppIndicator), this is the only way out besides killing it.
+#[tauri::command]
+pub fn quit(app: tauri::AppHandle) {
+    app.exit(0);
+}
+
 #[tauri::command]
 pub async fn contacts(state: State<'_, AppState>) -> Result<Vec<ContactDto>> {
     Ok(state
@@ -137,15 +145,31 @@ pub async fn inbox(state: State<'_, AppState>) -> Result<Vec<OfferDto>> {
 
 #[tauri::command]
 pub async fn accept(
+    app: tauri::AppHandle,
     state: State<'_, AppState>,
     from: String,
     root: String,
     dest: PathBuf,
 ) -> Result<Vec<PathBuf>> {
-    Ok(state
-        .node()?
-        .accept(from.parse()?, root.parse()?, &dest)
-        .await?)
+    let (from, root) = (from.parse()?, root.parse()?);
+    let node = state.node()?;
+    let written = node.accept(from, root, &dest).await?;
+    // A long download may end while the window is in the background.
+    let title = node
+        .inbox()?
+        .into_iter()
+        .find(|offer| offer.from == from && offer.root == root)
+        .map_or_else(|| "The share".to_owned(), |offer| offer.title);
+    let folder = dest.file_name().map_or_else(
+        || dest.display().to_string(),
+        |name| name.to_string_lossy().into_owned(),
+    );
+    desktop::notify(
+        &app,
+        "Download saved",
+        &format!("{title} saved to {folder}"),
+    );
+    Ok(written)
 }
 
 #[tauri::command]

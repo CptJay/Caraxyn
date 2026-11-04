@@ -4,6 +4,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod commands;
+mod desktop;
 mod dto;
 mod error;
 mod events;
@@ -15,7 +16,7 @@ use std::{
 };
 
 use caraxyn_core::node::{Node, NodeConfig};
-use tauri::{Manager, RunEvent};
+use tauri::{Manager, RunEvent, WindowEvent};
 use tracing_appender::{
     non_blocking::WorkerGuard,
     rolling::{RollingFileAppender, Rotation},
@@ -25,7 +26,17 @@ use tracing_subscriber::{EnvFilter, fmt, prelude::*};
 use crate::{commands::AppState, error::UiError, settings::Settings};
 
 fn main() {
-    let app = tauri::Builder::default()
+    let mut builder = tauri::Builder::default();
+    // A second launch brings back the running app's window instead (its data
+    // folder is locked anyway). Registered first, as the plugin asks. Test
+    // instances with their own CARAXYN_DATA_DIR each run on their own.
+    if std::env::var_os("CARAXYN_DATA_DIR").is_none() {
+        builder = builder.plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+            desktop::show_window(app);
+        }));
+    }
+    let app = builder
+        .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
         .setup(|app| {
@@ -77,12 +88,27 @@ fn main() {
                 data_dir,
                 settings: Mutex::new(settings),
             });
+            desktop::add_tray(app.handle())?;
             Ok(())
+        })
+        .on_window_event(|window, event| {
+            // Closing hides the window to the tray, so contacts can keep fetching
+            // and offers keep arriving; Quit in the tray menu stops the app.
+            if let WindowEvent::CloseRequested { api, .. } = event {
+                let state = window.state::<AppState>();
+                if state.node.is_some() && state.settings().keep_running_in_tray {
+                    api.prevent_close();
+                    if let Err(e) = window.hide() {
+                        tracing::warn!(%e, "could not hide the window");
+                    }
+                }
+            }
         })
         .invoke_handler(tauri::generate_handler![
             commands::status,
             commands::save_settings,
             commands::open_log_folder,
+            commands::quit,
             commands::contacts,
             commands::create_invite,
             commands::redeem_invite,

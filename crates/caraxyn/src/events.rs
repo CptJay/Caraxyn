@@ -1,20 +1,37 @@
 //! Forwards the node's events to the UI.
 
-use caraxyn_core::node::Node;
+use std::collections::HashSet;
+
+use caraxyn_core::{
+    events::Event,
+    node::Node,
+    shares::{Offer, OfferState},
+};
 use tauri::{AppHandle, Emitter};
 use tokio::sync::broadcast::error::RecvError;
 
-use crate::dto::NodeEvent;
+use crate::{desktop, dto::NodeEvent};
 
 /// Emits every node event as `node-event`. After falling behind it emits
-/// `resync` instead, and the UI reloads its lists.
+/// `resync` instead, and the UI reloads its lists. A new offer also gets a
+/// desktop notification.
 pub fn forward(app: AppHandle, node: &Node) {
     let mut events = node.events();
+    let node = node.clone();
     tauri::async_runtime::spawn(async move {
+        // An offer arrives again when the sender extends or re-shares it; tell only once.
+        let mut notified = HashSet::new();
         loop {
             let sent = match events.recv().await {
-                Ok(event) => match NodeEvent::from_core(event) {
-                    Some(event) => app.emit("node-event", event),
+                Ok(event) => match NodeEvent::from_core(event.clone()) {
+                    Some(ui_event) => {
+                        if let Event::OfferReceived { offer } = &event
+                            && notified.insert((offer.from, offer.root))
+                        {
+                            notify_offer(&app, &node, offer);
+                        }
+                        app.emit("node-event", ui_event)
+                    }
                     None => continue,
                 },
                 Err(RecvError::Lagged(missed)) => {
@@ -28,4 +45,22 @@ pub fn forward(app: AppHandle, node: &Node) {
             }
         }
     });
+}
+
+/// "Sam shared holiday-photos (700.0 MB)", for an offer still waiting for an answer.
+fn notify_offer(app: &AppHandle, node: &Node, offer: &Offer) {
+    if offer.state != OfferState::New {
+        return;
+    }
+    let sender = node
+        .contacts()
+        .ok()
+        .and_then(|contacts| contacts.into_iter().find(|c| c.peer == offer.from))
+        .map_or_else(|| offer.from.short(), |contact| contact.name);
+    let body = format!(
+        "{sender} shared {} ({})",
+        offer.title,
+        desktop::size(offer.total_size)
+    );
+    desktop::notify(app, "New share", &body);
 }

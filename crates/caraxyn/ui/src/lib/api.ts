@@ -14,6 +14,8 @@ export type Millis = number;
 export interface Settings {
   displayName: string;
   downloadDir: string | null;
+  /** Closing the window hides it to the tray (sharing goes on); `false` quits. */
+  keepRunningInTray: boolean;
 }
 
 /** Whether contacts can reach us over the internet (through our relay server). */
@@ -89,6 +91,7 @@ export const api = {
   status: () => invoke<Status>('status'),
   saveSettings: (settings: Settings) => invoke<void>('save_settings', { settings }),
   openLogFolder: () => invoke<void>('open_log_folder'),
+  quit: () => invoke<void>('quit'),
 
   contacts: () => invoke<Contact[]>('contacts'),
   createInvite: () => invoke<string>('create_invite'),
