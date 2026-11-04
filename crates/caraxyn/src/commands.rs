@@ -14,7 +14,7 @@ use tauri::State;
 use tauri_plugin_opener::OpenerExt;
 
 use crate::{
-    dto::{ContactDto, OfferDto, PendingDto, ShareDto},
+    dto::{ContactDto, OfferDto, PendingDto, ShareDto, net_status_name},
     error::UiError,
     settings::Settings,
 };
@@ -63,6 +63,8 @@ type Result<T, E = UiError> = std::result::Result<T, E>;
 #[serde(rename_all = "camelCase")]
 pub struct Status {
     peer_id: Option<String>,
+    /// `null` when the node failed to start.
+    net_status: Option<&'static str>,
     startup_error: Option<String>,
     data_dir: PathBuf,
     settings: Settings,
@@ -72,6 +74,7 @@ pub struct Status {
 pub fn status(state: State<'_, AppState>) -> Status {
     Status {
         peer_id: state.node.as_ref().map(|n| n.peer_id().to_string()),
+        net_status: state.node.as_ref().map(|n| net_status_name(n.net_status())),
         startup_error: state.startup_error.as_ref().map(|e| e.message.clone()),
         data_dir: state.data_dir.clone(),
         settings: state.settings(),

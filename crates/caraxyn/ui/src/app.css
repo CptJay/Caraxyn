@@ -82,3 +82,38 @@ option {
 @utility field {
   @apply w-full rounded-md border border-line bg-panel px-3 py-1.5 text-sm outline-none focus:border-accent;
 }
+
+/* Connection dot in the status bar. Colored by currentColor; .breathe makes it pulse. */
+.status-dot {
+  width: 0.5rem;
+  height: 0.5rem;
+  border-radius: 9999px;
+  background: currentColor;
+}
+
+.status-dot.breathe {
+  background: radial-gradient(
+    circle at 35% 35%,
+    color-mix(in srgb, currentColor 45%, white),
+    currentColor 70%
+  );
+  animation: breathe 4s ease-in-out infinite;
+}
+
+@keyframes breathe {
+  0%,
+  100% {
+    opacity: 0.75;
+    box-shadow: 0 0 0 0 color-mix(in srgb, currentColor 50%, transparent);
+  }
+  50% {
+    opacity: 1;
+    box-shadow: 0 0 0 4px color-mix(in srgb, currentColor 0%, transparent);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .status-dot.breathe {
+    animation: none;
+  }
+}

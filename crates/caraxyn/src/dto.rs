@@ -5,7 +5,7 @@
 
 use caraxyn_core::{
     contacts::Contact,
-    events::Event,
+    events::{Event, NetStatus},
     shares::{MyShare, Offer, OfferState, PendingOffer},
 };
 use serde::Serialize;
@@ -114,6 +114,15 @@ impl From<PendingOffer> for PendingDto {
     }
 }
 
+/// `connecting`, `online` or `offline`.
+pub fn net_status_name(status: NetStatus) -> &'static str {
+    match status {
+        NetStatus::Connecting => "connecting",
+        NetStatus::Online => "online",
+        NetStatus::Offline => "offline",
+    }
+}
+
 /// A node event, sent to the UI as `node-event`.
 #[derive(Clone, Serialize)]
 #[serde(
@@ -141,6 +150,9 @@ pub enum NodeEvent {
         to: String,
         root: String,
         revoke: bool,
+    },
+    NetStatus {
+        status: &'static str,
     },
     Progress {
         from: String,
@@ -177,6 +189,9 @@ impl NodeEvent {
                 to: to.to_string(),
                 root: root.to_string(),
                 revoke,
+            },
+            Event::NetStatus { status } => Self::NetStatus {
+                status: net_status_name(status),
             },
             Event::Progress {
                 from,

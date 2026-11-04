@@ -11,7 +11,7 @@ use std::{
 };
 
 use iroh::{
-    Endpoint, EndpointId,
+    Endpoint, EndpointId, Watcher,
     address_lookup::MemoryLookup,
     endpoint::presets::{self, Preset},
     protocol::Router,
@@ -43,7 +43,7 @@ use crate::{
         encode_invite, now_ms,
     },
     error::Error,
-    events::{EVENT_BUFFER, Event, tell, warn_about},
+    events::{EVENT_BUFFER, Event, NetStatus, tell, warn_about},
     ids::{ContentHash, PeerId},
     safe_name,
     shares::{MyShare, Offer, OfferState, PREVIEW_LEN},
@@ -231,6 +231,11 @@ impl Node {
             stop: Arc::new(stop),
             events,
         };
+        tokio::spawn(watch_net_status(
+            node.router.endpoint().home_relay_status(),
+            node.events.clone(),
+            stopped.clone(),
+        ));
         let postman_node = node.clone();
         tokio::spawn(outbox::supervise(
             node.events.clone(),
@@ -248,6 +253,13 @@ impl Node {
     #[must_use]
     pub fn events(&self) -> broadcast::Receiver<Event> {
         self.events.subscribe()
+    }
+
+    /// Whether this node can be reached over the internet right now. Changes
+    /// arrive as [`Event::NetStatus`].
+    #[must_use]
+    pub fn net_status(&self) -> NetStatus {
+        relay_status(&self.router.endpoint().home_relay_status().get())
     }
 
     /// This node's identity.
@@ -993,6 +1005,37 @@ async fn run_blob_gate(
                 m.tx.send(verdict(ok)).await.ok();
             }
             _ => {}
+        }
+    }
+}
+
+fn relay_status(relays: &[iroh::endpoint::RelayStatus]) -> NetStatus {
+    NetStatus::from_relays(
+        relays
+            .iter()
+            .map(|relay| (relay.is_connected(), relay.last_error().is_some())),
+    )
+}
+
+/// Tells listeners each time the [`NetStatus`] changes, until the node stops.
+async fn watch_net_status(
+    relays: impl Watcher<Value = Vec<iroh::endpoint::RelayStatus>> + Unpin,
+    events: broadcast::Sender<Event>,
+    mut stop: watch::Receiver<bool>,
+) {
+    let mut relays = relays.stream();
+    let mut last = None;
+    loop {
+        tokio::select! {
+            Some(value) = relays.next() => {
+                let status = relay_status(&value);
+                if last != Some(status) {
+                    last = Some(status);
+                    tell(&events, Event::NetStatus { status });
+                }
+            }
+            _ = stop.changed() => return,
+            else => return,
         }
     }
 }

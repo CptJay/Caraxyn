@@ -50,6 +50,11 @@
         </div>
       </main>
     </div>
-    <StatusBar peerId={app.status.peerId} downloads={Object.keys(app.downloads).length} warnings={app.warnings.length} />
+    <StatusBar
+      peerId={app.status.peerId}
+      netStatus={app.status.netStatus ?? 'connecting'}
+      downloads={Object.keys(app.downloads).length}
+      warnings={app.warnings.length}
+    />
   </div>
 {/if}

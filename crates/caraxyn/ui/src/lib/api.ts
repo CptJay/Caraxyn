@@ -16,9 +16,13 @@ export interface Settings {
   downloadDir: string | null;
 }
 
+/** Whether contacts can reach us over the internet (through our relay server). */
+export type NetStatus = 'connecting' | 'online' | 'offline';
+
 export interface Status {
   /** `null` when the node failed to start. */
   peerId: PeerId | null;
+  netStatus: NetStatus | null;
   startupError: string | null;
   dataDir: string;
   settings: Settings;
@@ -69,6 +73,7 @@ export type NodeEvent =
   | { type: 'offerRevoked'; from: PeerId; root: ContentHash }
   | { type: 'delivered'; to: PeerId; root: ContentHash; revoke: boolean }
   | { type: 'undeliverable'; to: PeerId; root: ContentHash; revoke: boolean }
+  | { type: 'netStatus'; status: NetStatus }
   | { type: 'progress'; from: PeerId; root: ContentHash; bytes: number; total: number | null }
   | { type: 'warning'; context: string; message: string };
 

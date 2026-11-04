@@ -97,6 +97,9 @@ export function applyEvent(event: NodeEvent): void {
     case 'delivered':
       inBackground(refreshShares());
       break;
+    case 'netStatus':
+      if (app.status) app.status.netStatus = event.status;
+      break;
     case 'progress': {
       const key = pairKey(event.from, event.root);
       if (key in app.downloads) app.downloads[key] = { bytes: event.bytes, total: event.total };
