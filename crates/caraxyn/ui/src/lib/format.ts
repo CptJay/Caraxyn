@@ -33,7 +33,6 @@ const FRIENDLY: Record<string, string> = {
   Stalled: 'The sender could not be reached. Retry later; the download resumes where it stopped.',
   ShareRevoked: 'The sender withdrew this share.',
   ContactRejected: 'The invite was refused. It may be used already or expired (invites last 24 h).',
-  InvalidInvite: 'That is not a valid invite code.',
   NoDisplayName: 'Set your display name in Settings first.',
 };
 
