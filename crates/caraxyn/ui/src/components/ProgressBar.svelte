@@ -1,9 +1,12 @@
 <script lang="ts">
-  import { formatBytes } from '../lib/format';
+  import { formatBytes, formatSpeed, formatTimeLeft } from '../lib/format';
+  import { secondsLeft, type Transfer } from '../lib/transfer';
 
-  let { bytes, total }: { bytes: number; total: number | null } = $props();
+  let { transfer }: { transfer: Transfer } = $props();
 
+  const { bytes, total } = $derived(transfer);
   const percent = $derived(total ? Math.min(100, Math.round((bytes / total) * 100)) : null);
+  const left = $derived(secondsLeft(transfer));
 </script>
 
 <div class="space-y-1">
@@ -16,7 +19,10 @@
   >
     <div class="h-full bg-accent transition-[width]" style:width="{percent ?? 0}%"></div>
   </div>
-  <p class="text-xs text-muted">
+  <p class="text-xs text-muted tabular-nums">
     {formatBytes(bytes)}{total ? ` of ${formatBytes(total)}` : ''}{percent !== null ? ` · ${percent}%` : ''}
+    {#if transfer.speed !== null}
+      · {formatSpeed(transfer.speed)}{left !== null ? ` · ${formatTimeLeft(left)}` : ''}
+    {/if}
   </p>
 </div>

@@ -75,6 +75,7 @@ export type NodeEvent =
   | { type: 'delivered'; to: PeerId; root: ContentHash; revoke: boolean }
   | { type: 'undeliverable'; to: PeerId; root: ContentHash; revoke: boolean }
   | { type: 'netStatus'; status: NetStatus }
+  | { type: 'upload'; to: PeerId; root: ContentHash; bytes: number; total: number; finished: boolean }
   | { type: 'progress'; from: PeerId; root: ContentHash; bytes: number; total: number | null }
   | { type: 'warning'; context: string; message: string };
 

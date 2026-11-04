@@ -17,13 +17,12 @@ import {
   type Status,
 } from './api';
 import { errorText, shortId } from './format';
+import { advance, startTransfer, type Transfer } from './transfer';
 
 export type View = 'inbox' | 'shares' | 'contacts' | 'settings';
 
-export interface Download {
-  bytes: number;
-  total: number | null;
-}
+/** A running download: bytes so far, total, and its speed. */
+export type Download = Transfer;
 
 /** Recipient + share, the key for per-pair maps. */
 export const pairKey = (peer: PeerId, root: ContentHash): string => `${peer}:${root}`;
@@ -38,6 +37,8 @@ export const app = $state({
   pending: [] as PendingOffer[],
   /** Running downloads by `pairKey(from, root)`. */
   downloads: {} as Record<string, Download>,
+  /** Contacts downloading our shares right now, by `pairKey(to, root)`. */
+  uploads: {} as Record<string, Transfer>,
   /** Offers that will not be retried (refused, or the share expired first), by `pairKey(to, root)`. */
   // shortcut: only known for this run (the core does not keep it), so a restart shows them as delivered.
   undeliverable: {} as Record<string, true>,
@@ -64,6 +65,8 @@ export async function init(): Promise<void> {
 
 /** Reads every list again from the node. */
 export async function reload(): Promise<void> {
+  // Known only from events, which may have been missed; running ones report again within a second.
+  app.uploads = {};
   [app.contacts, app.inbox, app.shares, app.pending] = await Promise.all([
     api.contacts(),
     api.inbox(),
@@ -100,9 +103,20 @@ export function applyEvent(event: NodeEvent): void {
     case 'netStatus':
       if (app.status) app.status.netStatus = event.status;
       break;
+    case 'upload': {
+      const key = pairKey(event.to, event.root);
+      if (event.finished) {
+        delete app.uploads[key];
+      } else {
+        const now = performance.now();
+        app.uploads[key] = advance(app.uploads[key] ?? startTransfer(event.total, now), event.bytes, event.total, now);
+      }
+      break;
+    }
     case 'progress': {
       const key = pairKey(event.from, event.root);
-      if (key in app.downloads) app.downloads[key] = { bytes: event.bytes, total: event.total };
+      const running = app.downloads[key];
+      if (running) app.downloads[key] = advance(running, event.bytes, event.total, performance.now());
       break;
     }
     case 'warning':
@@ -149,7 +163,7 @@ export async function accept(offer: Offer, dest?: string): Promise<void> {
   const folder = dest ?? app.status?.settings.downloadDir ?? (await pickPath(true));
   if (!folder) return;
   const key = pairKey(offer.from, offer.root);
-  app.downloads[key] = { bytes: 0, total: offer.totalSize };
+  app.downloads[key] = startTransfer(offer.totalSize, performance.now());
   await attempt(async () => {
     await api.accept(offer.from, offer.root, folder);
     app.inbox = await api.inbox();
@@ -248,7 +262,12 @@ export function copyText(text: string, hint: (copied: boolean) => void): Promise
 /** Where an offer (or its revoke) stands for one recipient of our share. */
 export type RecipientState = 'pending' | 'delivered' | 'undelivered' | 'revoking' | 'revoked';
 
-export function recipientState(share: Share, peer: PeerId): { state: RecipientState; attempts: number } {
+export function recipientState(
+  share: Share,
+  peer: PeerId,
+): { state: RecipientState; attempts: number; upload?: Transfer } {
+  const upload = app.uploads[pairKey(peer, share.root)];
+  if (upload) return { state: 'delivered', attempts: 0, upload };
   const mail = app.pending.find((p) => p.to === peer && p.root === share.root);
   const attempts = mail?.attempts ?? 0;
   if (share.revokedAt !== null) return { state: mail?.revoke ? 'revoking' : 'revoked', attempts };
