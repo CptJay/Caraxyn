@@ -19,7 +19,7 @@
   };
 </script>
 
-<span class="inline-flex items-center gap-1.5 rounded-full border border-line px-2 py-0.5 text-xs">
+<span class="inline-flex items-center gap-1.5 h-6 rounded-lg border border-outline px-2 text-xs">
   <span class="font-medium">{name}</span>
   <span class={COLOR[state]}>{LABEL[state]}{attempts > 0 ? ` (${attempts} tries)` : ''}</span>
 </span>

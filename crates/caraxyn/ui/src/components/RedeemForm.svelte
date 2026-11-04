@@ -15,7 +15,7 @@
 <form class="card space-y-2" onsubmit={submit}>
   <h2 class="font-medium">Add with a code</h2>
   <p class="text-sm text-muted">Paste the code someone sent you. They must be online.</p>
-  <textarea class="field font-mono text-xs" rows="3" placeholder="caraxyn1:…" aria-label="Invite code" bind:value={code}
+  <textarea class="field h-auto py-2 font-mono text-xs" rows="3" placeholder="caraxyn1:…" aria-label="Invite code" bind:value={code}
   ></textarea>
   <button class="btn btn-primary" type="submit" disabled={busy || !code.trim()}>
     {busy ? 'Connecting…' : 'Add contact'}

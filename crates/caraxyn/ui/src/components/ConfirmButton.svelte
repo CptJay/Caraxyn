@@ -19,7 +19,7 @@
         onconfirm();
       }}>{confirmLabel}</button
     >
-    <button class="btn" onclick={() => (asking = false)}>Cancel</button>
+    <button class="btn btn-outlined" onclick={() => (asking = false)}>Cancel</button>
   </span>
 {:else}
   <button class="btn" {disabled} onclick={() => (asking = true)}>{label}</button>

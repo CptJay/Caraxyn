@@ -39,11 +39,11 @@
       <Icon name="chevronDown" class="size-3.5" />
     </button>
     {#if open}
-      <div class="absolute top-full left-0 z-10 mt-1 flex w-36 flex-col rounded-md border border-line bg-panel p-1 shadow-lg">
-        <button type="button" class="flex items-center gap-2 rounded px-2 py-1.5 text-left text-sm hover:bg-bg" onclick={() => choose(false)}>
+      <div class="absolute top-full left-0 z-10 mt-1 flex w-40 flex-col rounded bg-menu py-2 shadow-m3-2">
+        <button type="button" class="flex h-10 items-center gap-3 px-3 text-left text-sm hover:bg-fg/8" onclick={() => choose(false)}>
           <Icon name="file" /> File…
         </button>
-        <button type="button" class="flex items-center gap-2 rounded px-2 py-1.5 text-left text-sm hover:bg-bg" onclick={() => choose(true)}>
+        <button type="button" class="flex h-10 items-center gap-3 px-3 text-left text-sm hover:bg-fg/8" onclick={() => choose(true)}>
           <Icon name="folder" /> Folder…
         </button>
       </div>

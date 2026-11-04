@@ -1,7 +1,7 @@
 <script lang="ts">
   import PageHeader from '../components/PageHeader.svelte';
   import PathPicker from '../components/PathPicker.svelte';
-  import SettingsSection from '../components/SettingsSection.svelte';
+  import FormSection from '../components/FormSection.svelte';
   import type { Settings } from '../lib/api';
   import { openLogFolder, saveSettings } from '../lib/state.svelte';
 
@@ -31,7 +31,7 @@
 <PageHeader title="Settings" />
 
 <div class="space-y-4">
-  <SettingsSection title="Profile">
+  <FormSection title="Profile">
     <form class="space-y-3" onsubmit={saveName} oninput={() => (nameSaved = false)}>
       <label class="block space-y-1">
         <span class="text-sm font-medium">Display name</span>
@@ -42,9 +42,9 @@
         {#if nameSaved}<span class="text-sm text-ok">Saved</span>{/if}
       </div>
     </form>
-  </SettingsSection>
+  </FormSection>
 
-  <SettingsSection title="Storage">
+  <FormSection title="Storage">
     <div class="space-y-1">
       <span class="text-sm font-medium">Download folder</span>
       <PathPicker bind:path={downloadDir} directory label="Choose folder" onpicked={saveFolder} />
@@ -56,9 +56,9 @@
       <span class="block text-xs text-muted">Your identity, contacts and shares. Keep it private.</span>
     </div>
     <button class="btn" onclick={openLogFolder}>Open log folder</button>
-  </SettingsSection>
+  </FormSection>
 
-  <SettingsSection title="About">
+  <FormSection title="About">
     <dl class="grid grid-cols-[max-content_1fr] gap-x-6 gap-y-1 text-sm">
       <dt class="text-muted">App</dt>
       <dd>Caraxyn {version}</dd>
@@ -67,5 +67,5 @@
       <dt class="text-muted">Made by</dt>
       <dd>CptJay</dd>
     </dl>
-  </SettingsSection>
+  </FormSection>
 </div>

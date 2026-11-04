@@ -1,6 +1,7 @@
 <script lang="ts">
   import ContactPicker from '../components/ContactPicker.svelte';
   import ExpiryPicker from '../components/ExpiryPicker.svelte';
+  import FormSection from '../components/FormSection.svelte';
   import SourcePicker from '../components/SourcePicker.svelte';
   import type { PeerId } from '../lib/api';
   import { app, share } from '../lib/state.svelte';
@@ -24,24 +25,27 @@
   }
 </script>
 
-<form class="card space-y-4" onsubmit={submit}>
-  <h2 class="font-medium">New share</h2>
+<form class="space-y-4 pb-4" onsubmit={submit}>
+  <h2 class="text-base font-medium">New share</h2>
 
-  <SourcePicker bind:path />
+  <FormSection title="What to share">
+    <SourcePicker bind:path />
+  </FormSection>
 
-  {#if app.contacts.length === 0}
-    <p class="text-sm text-muted">Add a contact first; shares go to contacts only.</p>
-  {:else}
-    <ContactPicker contacts={app.contacts} bind:selected={recipients} />
-  {/if}
+  <FormSection title="Share with">
+    {#if app.contacts.length === 0}
+      <p class="text-sm text-muted">Add a contact first; shares go to contacts only.</p>
+    {:else}
+      <ContactPicker contacts={app.contacts} bind:selected={recipients} />
+    {/if}
+  </FormSection>
 
-  <div class="flex items-center gap-2 text-sm">
-    <span>Available for</span>
+  <FormSection title="Available for">
     <ExpiryPicker bind:value={duration} />
-  </div>
+  </FormSection>
 
   <div class="flex gap-2">
     <button class="btn btn-primary" type="submit" disabled={!ready}>{busy ? 'Sharing…' : 'Share'}</button>
-    <button class="btn" type="button" onclick={ondone}>Cancel</button>
+    <button class="btn btn-outlined" type="button" onclick={ondone}>Cancel</button>
   </div>
 </form>
