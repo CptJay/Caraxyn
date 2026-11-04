@@ -42,6 +42,7 @@ impl From<Error> for UiError {
             Error::Database(_) => "Database",
             Error::InvalidKeyFile(_) => "InvalidKeyFile",
             Error::AlreadyExists(_) => "AlreadyExists",
+            Error::NotEnoughSpace { .. } => "NotEnoughSpace",
             _ => "Other",
         };
         Self::new(kind, e.to_string())

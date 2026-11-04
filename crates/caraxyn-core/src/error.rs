@@ -91,6 +91,21 @@ pub enum Error {
     /// Exporting would overwrite a file that already exists.
     #[error("{} already exists", .0.display())]
     AlreadyExists(PathBuf),
+    /// A download would not fit on the disk holding `path`.
+    #[error(
+        "not enough space on the disk with {}: needs {} MB, {} MB free",
+        path.display(),
+        needed.div_ceil(1 << 20),
+        available / (1 << 20)
+    )]
+    NotEnoughSpace {
+        /// A folder on that disk.
+        path: PathBuf,
+        /// Bytes the download needs there.
+        needed: u64,
+        /// Bytes free there.
+        available: u64,
+    },
 }
 
 impl Error {

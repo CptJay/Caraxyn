@@ -6,6 +6,7 @@ rust-version.workspace = true
 
 [dependencies]
 data-encoding = { workspace = true }
+fs4 = { workspace = true }
 hex = { workspace = true }
 iroh = { workspace = true }
 iroh-blobs = { workspace = true }
