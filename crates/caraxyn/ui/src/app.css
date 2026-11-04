@@ -1,0 +1,119 @@
+@import 'tailwindcss';
+
+/* Colors in one place; dark mode follows the OS. */
+:root {
+  /* Native controls (dropdown lists, checkboxes, scrollbars) follow the theme too. */
+  color-scheme: light dark;
+  --bg: #f6f6f8;
+  --panel: #ffffff;
+  --fg: #18181b;
+  --muted: #71717a;
+  --line: #e4e4e7;
+  --accent: #4f46e5;
+  --accent-fg: #ffffff;
+  --danger: #dc2626;
+  --ok: #16a34a;
+  --warn: #d97706;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #0f0f12;
+    --panel: #18181c;
+    --fg: #ececf1;
+    --muted: #9a9aa6;
+    --line: #2a2a31;
+    --accent: #818cf8;
+    --accent-fg: #0f0f12;
+    --danger: #f87171;
+    --ok: #4ade80;
+    --warn: #fbbf24;
+  }
+}
+
+@theme inline {
+  --color-bg: var(--bg);
+  --color-panel: var(--panel);
+  --color-fg: var(--fg);
+  --color-muted: var(--muted);
+  --color-line: var(--line);
+  --color-accent: var(--accent);
+  --color-accent-fg: var(--accent-fg);
+  --color-danger: var(--danger);
+  --color-ok: var(--ok);
+  --color-warn: var(--warn);
+}
+
+html,
+body,
+#app {
+  height: 100%;
+}
+
+body {
+  @apply bg-bg text-fg antialiased;
+  font-family: ui-sans-serif, system-ui, sans-serif;
+  font-size: 14px;
+}
+
+/* Some webviews draw option lists natively; without this the text can match the background. */
+option {
+  background-color: var(--panel);
+  color: var(--fg);
+}
+
+/* Shared button look; add `btn-primary` or `btn-danger` for the strong variants. */
+@utility btn {
+  @apply inline-flex items-center gap-1.5 rounded-md border border-line bg-panel px-3 py-1.5 text-sm font-medium hover:bg-bg disabled:cursor-not-allowed disabled:opacity-50;
+}
+
+@utility btn-primary {
+  @apply border-accent bg-accent text-accent-fg hover:bg-accent hover:opacity-90;
+}
+
+@utility btn-danger {
+  @apply border-danger text-danger;
+}
+
+@utility card {
+  @apply rounded-lg border border-line bg-panel p-4;
+}
+
+@utility field {
+  @apply w-full rounded-md border border-line bg-panel px-3 py-1.5 text-sm outline-none focus:border-accent;
+}
+
+/* Connection dot in the status bar. Colored by currentColor; .breathe makes it pulse. */
+.status-dot {
+  width: 0.5rem;
+  height: 0.5rem;
+  border-radius: 9999px;
+  background: currentColor;
+}
+
+.status-dot.breathe {
+  background: radial-gradient(
+    circle at 35% 35%,
+    color-mix(in srgb, currentColor 45%, white),
+    currentColor 70%
+  );
+  animation: breathe 4s ease-in-out infinite;
+}
+
+@keyframes breathe {
+  0%,
+  100% {
+    opacity: 0.75;
+    box-shadow: 0 0 0 0 color-mix(in srgb, currentColor 50%, transparent);
+  }
+  50% {
+    opacity: 1;
+    box-shadow: 0 0 0 4px color-mix(in srgb, currentColor 0%, transparent);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .status-dot.breathe {
+    animation: none;
+  }
+}

@@ -11,7 +11,7 @@ use std::{
 };
 
 use iroh::{
-    Endpoint, EndpointId,
+    Endpoint, EndpointId, Watcher,
     address_lookup::MemoryLookup,
     endpoint::presets::{self, Preset},
     protocol::Router,
@@ -43,10 +43,10 @@ use crate::{
         encode_invite, now_ms,
     },
     error::Error,
-    events::{EVENT_BUFFER, Event, tell, warn_about},
+    events::{EVENT_BUFFER, Event, NetStatus, tell, warn_about},
     ids::{ContentHash, PeerId},
     safe_name,
-    shares::{Offer, OfferState, PREVIEW_LEN},
+    shares::{MyShare, Offer, OfferState, PREVIEW_LEN},
 };
 
 /// Background timing; tests use shorter values to see things happen.
@@ -217,6 +217,7 @@ impl Node {
                     access: Arc::clone(&access),
                     postman: Arc::clone(&postman),
                     events: events.clone(),
+                    streams: Arc::new(tokio::sync::Semaphore::new(control::MAX_STREAMS)),
                 },
             )
             .spawn();
@@ -230,6 +231,11 @@ impl Node {
             stop: Arc::new(stop),
             events,
         };
+        tokio::spawn(watch_net_status(
+            node.router.endpoint().home_relay_status(),
+            node.events.clone(),
+            stopped.clone(),
+        ));
         let postman_node = node.clone();
         tokio::spawn(outbox::supervise(
             node.events.clone(),
@@ -247,6 +253,13 @@ impl Node {
     #[must_use]
     pub fn events(&self) -> broadcast::Receiver<Event> {
         self.events.subscribe()
+    }
+
+    /// Whether this node can be reached over the internet right now. Changes
+    /// arrive as [`Event::NetStatus`].
+    #[must_use]
+    pub fn net_status(&self) -> NetStatus {
+        relay_status(&self.router.endpoint().home_relay_status().get())
     }
 
     /// This node's identity.
@@ -683,6 +696,49 @@ impl Node {
         }
     }
 
+    /// Removes one of our shares from the list for good. A share still active is
+    /// [revoked](Self::revoke) first; recipients not yet told of the revoke
+    /// still are. Sharing the same content again later starts afresh.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::UnknownShare`] if there is no such share, and the errors of
+    /// [`revoke`](Self::revoke).
+    pub async fn forget_share(&self, root: ContentHash) -> Result<(), Error> {
+        let share = self.access.db().share(root)?.ok_or(Error::UnknownShare)?;
+        if share.revoked_at.is_none() {
+            self.revoke(root).await?;
+        }
+        if !self.access.remove_share(root)? {
+            return Err(Error::UnknownShare);
+        }
+        info!(share = %root.short(), "share forgotten");
+        Ok(())
+    }
+
+    /// Every share we made, including revoked and expired ones.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Database`] if the shares cannot be read.
+    pub fn shares(&self) -> Result<Vec<MyShare>, Error> {
+        Ok(self
+            .access
+            .db()
+            .shares()?
+            .into_iter()
+            .map(|(root, share)| MyShare {
+                root,
+                title: share.title,
+                recipients: share.recipients,
+                file_count: share.file_count,
+                total_size: share.total_size,
+                revoked_at: share.revoked_at,
+                expires_at: share.expires_at,
+            })
+            .collect())
+    }
+
     /// Every share offered to us, in any state.
     ///
     /// # Errors
@@ -743,6 +799,26 @@ impl Node {
         } else {
             Err(Error::UnknownOffer)
         }
+    }
+
+    /// Removes an offer from the inbox, in any state, and frees what was
+    /// downloaded of it but not saved. Offered again later, it arrives as new.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::UnknownOffer`] if `from` never offered `root`,
+    /// [`Error::Database`] if the change cannot be saved.
+    pub async fn forget_offer(&self, from: PeerId, root: ContentHash) -> Result<(), Error> {
+        if !self.access.db().remove_offer(from, root)? {
+            return Err(Error::UnknownOffer);
+        }
+        // The stored copy is shared by every offer of this content; keep it while another one is left.
+        let still_offered = self.inbox()?.iter().any(|offer| offer.root == root);
+        // Not an error: the offer is gone; a leftover tag only keeps its data until the next fetch.
+        if !still_offered && let Err(e) = self.store.tags().delete(recv_tag(root)).await {
+            warn_about(&self.events, "freeing a forgotten offer's data", e);
+        }
+        Ok(())
     }
 
     /// Writes a share held in our store into the existing folder `dest`.
@@ -929,6 +1005,37 @@ async fn run_blob_gate(
                 m.tx.send(verdict(ok)).await.ok();
             }
             _ => {}
+        }
+    }
+}
+
+fn relay_status(relays: &[iroh::endpoint::RelayStatus]) -> NetStatus {
+    NetStatus::from_relays(
+        relays
+            .iter()
+            .map(|relay| (relay.is_connected(), relay.last_error().is_some())),
+    )
+}
+
+/// Tells listeners each time the [`NetStatus`] changes, until the node stops.
+async fn watch_net_status(
+    relays: impl Watcher<Value = Vec<iroh::endpoint::RelayStatus>> + Unpin,
+    events: broadcast::Sender<Event>,
+    mut stop: watch::Receiver<bool>,
+) {
+    let mut relays = relays.stream();
+    let mut last = None;
+    loop {
+        tokio::select! {
+            Some(value) = relays.next() => {
+                let status = relay_status(&value);
+                if last != Some(status) {
+                    last = Some(status);
+                    tell(&events, Event::NetStatus { status });
+                }
+            }
+            _ = stop.changed() => return,
+            else => return,
         }
     }
 }

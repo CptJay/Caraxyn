@@ -180,13 +180,29 @@ impl Db {
         tx.commit().map_err(Error::database)
     }
 
-    /// Saves a newly issued invite token.
+    /// Saves a newly issued invite token, and deletes the used and expired
+    /// ones: they would be refused anyway, so keeping them only grows the table.
     pub(super) fn add_invite(&self, token: InviteToken, issued_at: u64) -> Result<(), Error> {
         let tx = self.0.begin_write().map_err(Error::database)?;
-        tx.open_table(INVITES)
-            .map_err(Error::database)?
-            .insert(token.as_bytes(), (issued_at, false))
-            .map_err(Error::database)?;
+        {
+            let mut invites = tx.open_table(INVITES).map_err(Error::database)?;
+            let spent: Vec<[u8; 16]> = invites
+                .iter()
+                .map_err(Error::database)?
+                .map(|row| row.map(|(key, value)| (*key.value(), value.value())))
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(Error::database)?
+                .into_iter()
+                .filter(|(_, (at, used))| check_invite(*at, *used, issued_at).is_err())
+                .map(|(key, _)| key)
+                .collect();
+            for key in spent {
+                invites.remove(&key).map_err(Error::database)?;
+            }
+            invites
+                .insert(token.as_bytes(), (issued_at, false))
+                .map_err(Error::database)?;
+        }
         tx.commit().map_err(Error::database)
     }
 
@@ -393,6 +409,22 @@ impl Db {
         Ok(Some(share))
     }
 
+    /// Deletes a share. Messages for it in the outbox stay. Returns the share
+    /// as it was, or `None` if there was none.
+    pub(super) fn remove_share(&self, root: ContentHash) -> Result<Option<Share>, Error> {
+        let tx = self.0.begin_write().map_err(Error::database)?;
+        let removed = tx
+            .open_table(SHARES)
+            .map_err(Error::database)?
+            .remove(root.as_ref())
+            .map_err(Error::database)?
+            .map(|row| postcard::from_bytes(row.value()))
+            .transpose()
+            .map_err(Error::database)?;
+        tx.commit().map_err(Error::database)?;
+        Ok(removed)
+    }
+
     /// Every share, by root hash.
     pub(super) fn shares(&self) -> Result<Vec<(ContentHash, Share)>, Error> {
         let tx = self.0.begin_read().map_err(Error::database)?;
@@ -585,6 +617,19 @@ impl Db {
         Ok(true)
     }
 
+    /// Deletes an offer from the inbox. Returns false if there was none.
+    pub(super) fn remove_offer(&self, from: PeerId, root: ContentHash) -> Result<bool, Error> {
+        let tx = self.0.begin_write().map_err(Error::database)?;
+        let found = tx
+            .open_table(INBOX)
+            .map_err(Error::database)?
+            .remove(&pair_key(from, root))
+            .map_err(Error::database)?
+            .is_some();
+        tx.commit().map_err(Error::database)?;
+        Ok(found)
+    }
+
     /// Every offer in the inbox.
     pub(super) fn inbox(&self) -> Result<Vec<Offer>, Error> {
         let tx = self.0.begin_read().map_err(Error::database)?;
@@ -710,6 +755,29 @@ mod tests {
 
         assert_eq!(db.contacts().unwrap(), vec![contact(2)]);
         assert_eq!(db.allowed().unwrap(), HashSet::from([contact(2).peer]));
+    }
+
+    #[test]
+    fn a_new_invite_clears_out_used_and_expired_ones() {
+        let dir = TempDir::new().unwrap();
+        let db = Db::open(&dir.path().join("caraxyn.redb")).unwrap();
+        let day = crate::contacts::INVITE_TTL_MS;
+        let (used, expired, valid) = (
+            InviteToken::random(),
+            InviteToken::random(),
+            InviteToken::random(),
+        );
+        db.add_invite(used, day).unwrap();
+        db.add_invite(expired, 0).unwrap();
+        assert!(db.redeem(used, &contact(1), day).unwrap());
+        db.add_invite(valid, day + 1).unwrap();
+
+        db.add_invite(InviteToken::random(), day + 2).unwrap();
+
+        let tx = db.0.begin_read().unwrap();
+        let left = tx.open_table(INVITES).unwrap().iter().unwrap().count();
+        assert_eq!(left, 2, "the valid one and the newest");
+        assert!(db.redeem(valid, &contact(2), day + 3).unwrap());
     }
 
     #[test]

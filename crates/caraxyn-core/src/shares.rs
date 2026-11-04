@@ -22,6 +22,25 @@ pub struct PendingOffer {
     pub attempts: u32,
 }
 
+/// One of our own shares, as the sender sees it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MyShare {
+    /// The share's hash.
+    pub root: ContentHash,
+    /// The shared file's or folder's name.
+    pub title: String,
+    /// Who may fetch it.
+    pub recipients: Vec<PeerId>,
+    /// How many files it holds.
+    pub file_count: u64,
+    /// Their total size in bytes.
+    pub total_size: u64,
+    /// When it was revoked (unix ms), if it was.
+    pub revoked_at: Option<u64>,
+    /// When it stops being served (unix ms), if ever.
+    pub expires_at: Option<u64>,
+}
+
 /// A share another device offered us, as kept in the inbox.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Offer {

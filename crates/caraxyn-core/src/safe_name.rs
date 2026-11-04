@@ -24,8 +24,8 @@ pub enum NameError {
     /// The name is `.` or `..`, which would point outside the target folder.
     #[error("`.` and `..` are not allowed")]
     DotName,
-    /// The name has a path separator, a control character or a character
-    /// Windows forbids.
+    /// The name has a path separator, a control character, an invisible
+    /// text-direction mark or a character Windows forbids.
     #[error("the character {0:?} is not allowed")]
     InvalidChar(char),
     /// The name is reserved by Windows (`CON`, `NUL`, `COM1`, ...).
@@ -42,6 +42,12 @@ pub enum NameError {
     Conflict,
 }
 
+/// Invisible characters that change the direction text is shown in. In a name
+/// they disguise it: `invoice\u{202E}fdp.exe` shows as `invoiceexe.pdf`.
+pub(crate) fn is_direction_mark(c: char) -> bool {
+    matches!(c, '\u{061C}' | '\u{200E}' | '\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}')
+}
+
 /// Returns `Ok(())` if `name` is safe to use as a single file name.
 pub(crate) fn check(name: &str) -> Result<(), NameError> {
     if name.is_empty() {
@@ -51,7 +57,9 @@ pub(crate) fn check(name: &str) -> Result<(), NameError> {
         return Err(NameError::DotName);
     }
     if let Some(c) = name.chars().find(|c| {
-        c.is_control() || matches!(c, '/' | '\\' | '<' | '>' | ':' | '"' | '|' | '?' | '*')
+        c.is_control()
+            || is_direction_mark(*c)
+            || matches!(c, '/' | '\\' | '<' | '>' | ':' | '"' | '|' | '?' | '*')
     }) {
         return Err(NameError::InvalidChar(c));
     }
@@ -111,5 +119,25 @@ mod tests {
         assert_eq!(check("x."), Err(NameError::TrailingDotOrSpace));
         assert_eq!(check("x "), Err(NameError::TrailingDotOrSpace));
         assert_eq!(check(&"a".repeat(256)), Err(NameError::TooLong(256)));
+    }
+
+    #[test]
+    fn direction_marks_that_disguise_a_name_are_refused() {
+        // Shows as "invoiceexe.pdf".
+        assert_eq!(
+            check("invoice\u{202E}fdp.exe"),
+            Err(NameError::InvalidChar('\u{202E}'))
+        );
+        for c in [
+            '\u{061C}', '\u{200E}', '\u{200F}', '\u{202A}', '\u{2066}', '\u{2069}',
+        ] {
+            assert_eq!(
+                check(&format!("a{c}b")),
+                Err(NameError::InvalidChar(c)),
+                "{c:?}"
+            );
+        }
+        // Zero-width joiners are ordinary in Persian and Indic names, and in emoji.
+        assert_eq!(check("می\u{200C}خواهم.txt"), Ok(()));
     }
 }

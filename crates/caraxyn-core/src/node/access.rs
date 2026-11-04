@@ -39,6 +39,19 @@ impl Shares {
         }
         self.roots.insert(root, share);
     }
+
+    /// Drops a share from the index.
+    fn remove(&mut self, root: ContentHash, share: &Share) {
+        self.roots.remove(&root);
+        for hash in &share.hashes {
+            if let Some(roots) = self.containing.get_mut(hash) {
+                roots.remove(&root);
+                if roots.is_empty() {
+                    self.containing.remove(hash);
+                }
+            }
+        }
+    }
 }
 
 impl Access {
@@ -101,6 +114,17 @@ impl Access {
         now: u64,
     ) -> Result<Option<Share>, Error> {
         self.change_share(root, |db| db.set_expiry(root, expires_at, now))
+    }
+
+    /// Deletes a share, then drops it from the index. Returns whether there was one.
+    pub(super) fn remove_share(&self, root: ContentHash) -> Result<bool, Error> {
+        // Lock held across the save, so memory and disk cannot disagree.
+        let mut shares = self.shares.write().expect("share lock poisoned");
+        let removed = self.db.remove_share(root)?;
+        if let Some(share) = &removed {
+            shares.remove(root, share);
+        }
+        Ok(removed.is_some())
     }
 
     fn change_share(

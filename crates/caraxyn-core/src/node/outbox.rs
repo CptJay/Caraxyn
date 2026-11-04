@@ -167,6 +167,8 @@ impl Node {
                 let delivery = node.deliver(entry).await;
                 if let Err(e) = node.record(entry, delivery) {
                     warn_about(&node.events, "updating the outbox", e);
+                    // The entry still looks due; without a pause it would be sent again at once.
+                    tokio::time::sleep(node.timing.retry_first).await;
                 }
             });
         }
@@ -205,13 +207,13 @@ impl Node {
     /// One attempt to deliver `entry`'s message.
     async fn deliver(&self, entry: OutboxEntry) -> Delivery {
         let (to, root) = (entry.to, entry.root);
-        let share = match self.access.db().share(root) {
-            Ok(Some(share)) => share,
-            Ok(None) => return Delivery::Dropped,
-            Err(_) => return Delivery::Failed,
-        };
         let (message, expected) = match entry.mail {
             Mail::Offer => {
+                let share = match self.access.db().share(root) {
+                    Ok(Some(share)) => share,
+                    Ok(None) => return Delivery::Dropped,
+                    Err(_) => return Delivery::Failed,
+                };
                 // No longer a recipient, or the share is withdrawn: not even the
                 // title may reach them.
                 if !share.recipients.contains(&to) || !share.is_active(now_ms()) {
@@ -227,6 +229,7 @@ impl Node {
                 };
                 (offer, ControlMsg::OfferReceived)
             }
+            // Needs only the root, so it still goes out after the share is forgotten.
             Mail::Revoke => (ControlMsg::Revoke { root }, ControlMsg::Ack),
         };
         let answer =

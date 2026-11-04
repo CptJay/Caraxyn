@@ -14,6 +14,35 @@ use crate::{
 /// How many events a slow listener may fall behind before it loses the oldest.
 pub(crate) const EVENT_BUFFER: usize = 256;
 
+/// Whether this node can be reached over the internet, through its home relay
+/// (a public server that helps others find and reach it). Devices on the same
+/// network may still connect directly when it is not online.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NetStatus {
+    /// Not reached the relay yet: just started, or trying again.
+    Connecting,
+    /// Connected to the relay: contacts anywhere can reach us.
+    Online,
+    /// The last attempt to reach the relay failed (no internet, or blocked).
+    Offline,
+}
+
+impl NetStatus {
+    /// The status from each home relay's `(connected, last attempt failed)`.
+    pub(crate) fn from_relays(relays: impl IntoIterator<Item = (bool, bool)>) -> Self {
+        let mut status = Self::Connecting;
+        for (connected, failed) in relays {
+            if connected {
+                return Self::Online;
+            }
+            if failed {
+                status = Self::Offline;
+            }
+        }
+        status
+    }
+}
+
 /// Something that happened in the node.
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
@@ -52,6 +81,11 @@ pub enum Event {
         root: ContentHash,
         /// `true` for the news of a revoke, `false` for the offer.
         revoke: bool,
+    },
+    /// The node's [`NetStatus`] changed.
+    NetStatus {
+        /// The new status.
+        status: NetStatus,
     },
     /// A download is under way (at most a few times per second, and once at the end).
     Progress {
@@ -93,4 +127,23 @@ pub(crate) fn warn_about(
             message: error.to_string(),
         },
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn any_connected_relay_means_online_and_a_failure_means_offline() {
+        assert_eq!(NetStatus::from_relays([]), NetStatus::Connecting);
+        assert_eq!(
+            NetStatus::from_relays([(false, false)]),
+            NetStatus::Connecting
+        );
+        assert_eq!(NetStatus::from_relays([(false, true)]), NetStatus::Offline);
+        assert_eq!(
+            NetStatus::from_relays([(false, true), (true, false)]),
+            NetStatus::Online
+        );
+    }
 }

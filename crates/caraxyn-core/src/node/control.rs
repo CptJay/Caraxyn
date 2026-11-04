@@ -11,7 +11,7 @@ use iroh::{
 };
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
-use tokio::sync::{Notify, broadcast};
+use tokio::sync::{Notify, Semaphore, broadcast};
 use tracing::debug;
 
 use super::access::Access;
@@ -34,6 +34,10 @@ const MAX_MSG: usize = 1 << 20;
 /// How long the other side may take to send its whole message.
 // shortcut: no test covers it (one would wait 10 s); make it a parameter if it needs one.
 const READ_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Most messages read at once, over all connections. With [`MAX_MSG`] each,
+/// that bounds the memory a flood of streams from strangers can take.
+pub(super) const MAX_STREAMS: usize = 64;
 
 /// Stream error code sent when a message is refused: retrying will not help.
 const REFUSED: VarInt = VarInt::from_u32(1);
@@ -125,6 +129,8 @@ pub(crate) struct ControlHandler {
     /// Woken when a peer with offers waiting for it shows up.
     pub(super) postman: Arc<Notify>,
     pub(super) events: broadcast::Sender<Event>,
+    /// [`MAX_STREAMS`] permits, shared by every connection.
+    pub(super) streams: Arc<Semaphore>,
 }
 
 impl ProtocolHandler for ControlHandler {
@@ -139,9 +145,14 @@ impl ProtocolHandler for ControlHandler {
         }
         // One stream per request, until the other side closes the connection.
         while let Ok((mut tx, mut rx)) = conn.accept_bi().await {
+            // Waits while too many are being read; this connection's further streams wait with it.
+            let Ok(permit) = Arc::clone(&self.streams).acquire_owned().await else {
+                break;
+            };
             let (access, events) = (Arc::clone(&self.access), self.events.clone());
             // Own task per request, so one slow stream does not hold up the others.
             tokio::spawn(async move {
+                let _permit = permit;
                 let answer = match recv(&mut rx).await {
                     Ok(msg) => answer(&access, &events, peer, msg),
                     Err(e) => {
