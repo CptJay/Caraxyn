@@ -30,6 +30,8 @@ jobs:
   build:
     needs: draft
     strategy:
+      # One platform failing does not cancel the other, so both results show.
+      fail-fast: false
       matrix:
         include:
           - os: ubuntu-22.04
@@ -54,7 +56,9 @@ jobs:
           cache-dependency-path: crates/caraxyn/ui/package-lock.json
       - run: npm ci
         working-directory: crates/caraxyn/ui
+      # bash on Windows too: PowerShell drops the bare `--`, so --locked reached tauri.
       - run: ui/node_modules/.bin/tauri build --ci --bundles ${{ matrix.bundle }} -- --locked
+        shell: bash
         working-directory: crates/caraxyn
       - name: Upload to the draft
         shell: bash
