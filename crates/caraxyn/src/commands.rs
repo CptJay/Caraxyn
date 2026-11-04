@@ -27,6 +27,8 @@ pub struct AppState {
     pub startup_error: Option<UiError>,
     pub data_dir: PathBuf,
     pub settings: Mutex<Settings>,
+    /// Whether the tray icon could be added (not on Linux without AppIndicator).
+    pub tray: bool,
 }
 
 impl AppState {

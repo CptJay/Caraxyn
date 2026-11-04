@@ -82,21 +82,23 @@ fn main() {
                     (None, Some(UiError::from(e)))
                 }
             };
+            let tray = desktop::add_tray(app.handle());
             app.manage(AppState {
                 node,
                 startup_error,
                 data_dir,
                 settings: Mutex::new(settings),
+                tray,
             });
-            desktop::add_tray(app.handle())?;
             Ok(())
         })
         .on_window_event(|window, event| {
             // Closing hides the window to the tray, so contacts can keep fetching
             // and offers keep arriving; Quit in the tray menu stops the app.
+            // Without a tray icon there would be no way back, so it quits instead.
             if let WindowEvent::CloseRequested { api, .. } = event {
                 let state = window.state::<AppState>();
-                if state.node.is_some() && state.settings().keep_running_in_tray {
+                if state.tray && state.node.is_some() && state.settings().keep_running_in_tray {
                     api.prevent_close();
                     if let Err(e) = window.hide() {
                         tracing::warn!(%e, "could not hide the window");

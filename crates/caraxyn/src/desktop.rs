@@ -1,5 +1,7 @@
 //! Desktop integration: the tray icon, bringing the window back, and notifications.
 
+use std::panic::AssertUnwindSafe;
+
 use tauri::{
     AppHandle, Manager,
     menu::{Menu, MenuItem},
@@ -17,9 +19,28 @@ pub fn show_window(app: &AppHandle) {
     }
 }
 
-/// Adds the tray icon. Its menu has Open and Quit; a left click also opens the
+/// Adds the tray icon and says whether it worked. Without one the app still runs,
+/// and closing the window quits it (see main).
+pub fn add_tray(app: &AppHandle) -> bool {
+    // On Linux the tray library is loaded at run time and panics when it is missing
+    // (an AppImage on a system without AppIndicator). Tauri builds the tray right here,
+    // on this thread, so the panic can be caught.
+    match std::panic::catch_unwind(AssertUnwindSafe(|| build_tray(app))) {
+        Ok(Ok(())) => true,
+        Ok(Err(e)) => {
+            tracing::warn!(%e, "no tray icon");
+            false
+        }
+        Err(_) => {
+            tracing::warn!("no tray icon: the system tray library is missing");
+            false
+        }
+    }
+}
+
+/// The tray icon. Its menu has Open and Quit; a left click also opens the
 /// window where the platform reports clicks (not on Linux, where the menu does it).
-pub fn add_tray(app: &AppHandle) -> tauri::Result<()> {
+fn build_tray(app: &AppHandle) -> tauri::Result<()> {
     let open = MenuItem::with_id(app, "open", "Open Caraxyn", true, None::<&str>)?;
     let quit = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
     let menu = Menu::with_items(app, &[&open, &quit])?;
