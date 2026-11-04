@@ -1,4 +1,7 @@
 //! What the UI can ask for. Each command converts ids and calls the core; no logic lives here.
+//!
+//! Every command that touches the disk is `async`: Tauri runs plain `fn` commands on the
+//! window's thread, so a slow database write would freeze the window.
 
 use std::{path::PathBuf, sync::Mutex};
 
@@ -76,7 +79,7 @@ pub fn status(state: State<'_, AppState>) -> Status {
 }
 
 #[tauri::command]
-pub fn save_settings(state: State<'_, AppState>, settings: Settings) -> Result<()> {
+pub async fn save_settings(state: State<'_, AppState>, settings: Settings) -> Result<()> {
     settings
         .save(&state.data_dir)
         .map_err(|e| UiError::new("Io", format!("could not save settings: {e}")))?;
@@ -88,7 +91,7 @@ pub fn save_settings(state: State<'_, AppState>, settings: Settings) -> Result<(
 }
 
 #[tauri::command]
-pub fn open_log_folder(app: tauri::AppHandle, state: State<'_, AppState>) -> Result<()> {
+pub async fn open_log_folder(app: tauri::AppHandle, state: State<'_, AppState>) -> Result<()> {
     let logs = state.data_dir.join("logs");
     app.opener()
         .open_path(logs.to_string_lossy(), None::<&str>)
@@ -96,7 +99,7 @@ pub fn open_log_folder(app: tauri::AppHandle, state: State<'_, AppState>) -> Res
 }
 
 #[tauri::command]
-pub fn contacts(state: State<'_, AppState>) -> Result<Vec<ContactDto>> {
+pub async fn contacts(state: State<'_, AppState>) -> Result<Vec<ContactDto>> {
     Ok(state
         .node()?
         .contacts()?
@@ -106,7 +109,7 @@ pub fn contacts(state: State<'_, AppState>) -> Result<Vec<ContactDto>> {
 }
 
 #[tauri::command]
-pub fn create_invite(state: State<'_, AppState>) -> Result<String> {
+pub async fn create_invite(state: State<'_, AppState>) -> Result<String> {
     Ok(state.node()?.create_invite(&state.display_name()?)?)
 }
 
@@ -117,12 +120,12 @@ pub async fn redeem_invite(state: State<'_, AppState>, code: String) -> Result<C
 }
 
 #[tauri::command]
-pub fn remove_contact(state: State<'_, AppState>, peer: String) -> Result<()> {
+pub async fn remove_contact(state: State<'_, AppState>, peer: String) -> Result<()> {
     Ok(state.node()?.remove_contact(peer.parse()?)?)
 }
 
 #[tauri::command]
-pub fn inbox(state: State<'_, AppState>) -> Result<Vec<OfferDto>> {
+pub async fn inbox(state: State<'_, AppState>) -> Result<Vec<OfferDto>> {
     Ok(state.node()?.inbox()?.into_iter().map(Into::into).collect())
 }
 
@@ -140,12 +143,12 @@ pub async fn accept(
 }
 
 #[tauri::command]
-pub fn decline(state: State<'_, AppState>, from: String, root: String) -> Result<()> {
+pub async fn decline(state: State<'_, AppState>, from: String, root: String) -> Result<()> {
     Ok(state.node()?.decline(from.parse()?, root.parse()?)?)
 }
 
 #[tauri::command]
-pub fn shares(state: State<'_, AppState>) -> Result<Vec<ShareDto>> {
+pub async fn shares(state: State<'_, AppState>) -> Result<Vec<ShareDto>> {
     Ok(state
         .node()?
         .shares()?
@@ -155,7 +158,7 @@ pub fn shares(state: State<'_, AppState>) -> Result<Vec<ShareDto>> {
 }
 
 #[tauri::command]
-pub fn pending_offers(state: State<'_, AppState>) -> Result<Vec<PendingDto>> {
+pub async fn pending_offers(state: State<'_, AppState>) -> Result<Vec<PendingDto>> {
     Ok(state
         .node()?
         .pending_offers()?
@@ -195,6 +198,10 @@ pub async fn revoke(state: State<'_, AppState>, root: String) -> Result<()> {
 }
 
 #[tauri::command]
-pub fn set_expiry(state: State<'_, AppState>, root: String, expires_at: Option<u64>) -> Result<()> {
+pub async fn set_expiry(
+    state: State<'_, AppState>,
+    root: String,
+    expires_at: Option<u64>,
+) -> Result<()> {
     Ok(state.node()?.set_expiry(root.parse()?, expires_at)?)
 }

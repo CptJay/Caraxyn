@@ -13,7 +13,10 @@ use std::{path::Path, sync::Mutex};
 
 use caraxyn_core::node::{Node, NodeConfig};
 use tauri::{Manager, RunEvent};
-use tracing_appender::non_blocking::WorkerGuard;
+use tracing_appender::{
+    non_blocking::WorkerGuard,
+    rolling::{InitError, RollingFileAppender, Rotation},
+};
 use tracing_subscriber::{EnvFilter, fmt, prelude::*};
 
 use crate::{commands::AppState, error::UiError, settings::Settings};
@@ -30,7 +33,7 @@ fn main() {
                 None => app.path().data_dir()?.join("caraxyn"),
             };
             std::fs::create_dir_all(&data_dir)?;
-            app.manage(start_logging(&data_dir));
+            app.manage(start_logging(&data_dir)?);
 
             let settings = Settings::load(&data_dir).unwrap_or_else(|e| {
                 tracing::warn!(%e, "settings unreadable, using defaults");
@@ -94,13 +97,19 @@ fn main() {
     });
 }
 
+/// How many daily log files to keep; older ones are deleted.
+const LOG_DAYS: usize = 7;
+
 /// Logs to stderr and to daily files in `data_dir/logs`, and logs panics.
 /// The returned guard flushes the file on drop, so it lives as long as the app.
-fn start_logging(data_dir: &Path) -> WorkerGuard {
-    let (file, guard) = tracing_appender::non_blocking(tracing_appender::rolling::daily(
-        data_dir.join("logs"),
-        "caraxyn.log",
-    ));
+fn start_logging(data_dir: &Path) -> Result<WorkerGuard, InitError> {
+    let appender = RollingFileAppender::builder()
+        .rotation(Rotation::DAILY)
+        .filename_prefix("caraxyn")
+        .filename_suffix("log")
+        .max_log_files(LOG_DAYS)
+        .build(data_dir.join("logs"))?;
+    let (file, guard) = tracing_appender::non_blocking(appender);
     tracing_subscriber::registry()
         .with(EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")))
         .with(fmt::layer())
@@ -112,5 +121,5 @@ fn start_logging(data_dir: &Path) -> WorkerGuard {
         tracing::error!(%info, "panic");
         default_hook(info);
     }));
-    guard
+    Ok(guard)
 }
