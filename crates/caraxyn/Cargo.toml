@@ -4,6 +4,7 @@ description = "Caraxyn desktop app: a Tauri window over caraxyn-core."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
+license.workspace = true
 
 [dependencies]
 caraxyn-core = { path = "../caraxyn-core" }

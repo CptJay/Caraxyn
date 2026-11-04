@@ -109,3 +109,14 @@ cd crates/caraxyn/ui && npm run check && npm test && npm run build
 ## Your data
 
 Everything Caraxyn keeps is in one folder: `~/.local/share/caraxyn` on Linux, `%APPDATA%\caraxyn` on Windows. It holds your identity key (`secret.key`; keep it private), the database, the content store, `settings.json` and the logs (the last 7 days, in `logs/`).
+
+## License
+
+Caraxyn is licensed under either of
+
+- Apache License, Version 2.0 ([LICENSE-APACHE](LICENSE-APACHE))
+- MIT license ([LICENSE-MIT](LICENSE-MIT))
+
+at your option. Unless you explicitly state otherwise, any contribution you submit for inclusion
+in Caraxyn, as defined in the Apache-2.0 license, is dual licensed as above, without any
+additional terms or conditions.
