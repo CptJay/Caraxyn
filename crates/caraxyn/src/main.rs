@@ -9,13 +9,16 @@ mod error;
 mod events;
 mod settings;
 
-use std::{path::Path, sync::Mutex};
+use std::{
+    path::{Path, PathBuf},
+    sync::Mutex,
+};
 
 use caraxyn_core::node::{Node, NodeConfig};
 use tauri::{Manager, RunEvent};
 use tracing_appender::{
     non_blocking::WorkerGuard,
-    rolling::{InitError, RollingFileAppender, Rotation},
+    rolling::{RollingFileAppender, Rotation},
 };
 use tracing_subscriber::{EnvFilter, fmt, prelude::*};
 
@@ -29,7 +32,16 @@ fn main() {
             // ~/.local/share/caraxyn on Linux, %APPDATA%\caraxyn on Windows.
             // CARAXYN_DATA_DIR overrides it, to run a second instance for testing.
             let data_dir = match std::env::var_os("CARAXYN_DATA_DIR") {
-                Some(dir) => dir.into(),
+                Some(dir) => {
+                    let dir = PathBuf::from(dir);
+                    // Tells test instances apart: "Caraxyn (a)", "Caraxyn (b)".
+                    if let (Some(window), Some(name)) =
+                        (app.get_webview_window("main"), dir.file_name())
+                    {
+                        window.set_title(&format!("Caraxyn ({})", name.to_string_lossy()))?;
+                    }
+                    dir
+                }
                 None => app.path().data_dir()?.join("caraxyn"),
             };
             std::fs::create_dir_all(&data_dir)?;
@@ -102,13 +114,16 @@ const LOG_DAYS: usize = 7;
 
 /// Logs to stderr and to daily files in `data_dir/logs`, and logs panics.
 /// The returned guard flushes the file on drop, so it lives as long as the app.
-fn start_logging(data_dir: &Path) -> Result<WorkerGuard, InitError> {
+fn start_logging(data_dir: &Path) -> Result<WorkerGuard, Box<dyn std::error::Error>> {
+    let logs = data_dir.join("logs");
+    // The builder looks for old files to delete before it creates the folder.
+    std::fs::create_dir_all(&logs)?;
     let appender = RollingFileAppender::builder()
         .rotation(Rotation::DAILY)
         .filename_prefix("caraxyn")
         .filename_suffix("log")
         .max_log_files(LOG_DAYS)
-        .build(data_dir.join("logs"))?;
+        .build(logs)?;
     let (file, guard) = tracing_appender::non_blocking(appender);
     tracing_subscriber::registry()
         .with(EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")))

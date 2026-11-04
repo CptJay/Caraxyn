@@ -58,11 +58,21 @@ ui/node_modules/.bin/tauri build
 
 ### Two instances on one machine
 
-To try invites and shares alone, give each instance its own data folder. With the first one running through `tauri dev`, start a second from the repository root:
+To try invites and shares alone, run two instances, "a" and "b", each with its own data folder (kept in `target/two-instances/`; delete it to start fresh). The windows are titled `Caraxyn (a)` and `Caraxyn (b)`. Ctrl-C stops both.
+
+Linux:
 
 ```bash
-CARAXYN_DATA_DIR=/tmp/caraxyn-b cargo run -p caraxyn
+scripts/two-instances.sh
 ```
+
+Windows (PowerShell):
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\two-instances.ps1
+```
+
+Under the hood, `CARAXYN_DATA_DIR` sets an instance's data folder.
 
 ## Checks
 
