@@ -217,6 +217,7 @@ impl Node {
                     access: Arc::clone(&access),
                     postman: Arc::clone(&postman),
                     events: events.clone(),
+                    streams: Arc::new(tokio::sync::Semaphore::new(control::MAX_STREAMS)),
                 },
             )
             .spawn();
@@ -766,6 +767,26 @@ impl Node {
         } else {
             Err(Error::UnknownOffer)
         }
+    }
+
+    /// Removes an offer from the inbox, in any state, and frees what was
+    /// downloaded of it but not saved. Offered again later, it arrives as new.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::UnknownOffer`] if `from` never offered `root`,
+    /// [`Error::Database`] if the change cannot be saved.
+    pub async fn forget_offer(&self, from: PeerId, root: ContentHash) -> Result<(), Error> {
+        if !self.access.db().remove_offer(from, root)? {
+            return Err(Error::UnknownOffer);
+        }
+        // The stored copy is shared by every offer of this content; keep it while another one is left.
+        let still_offered = self.inbox()?.iter().any(|offer| offer.root == root);
+        // Not an error: the offer is gone; a leftover tag only keeps its data until the next fetch.
+        if !still_offered && let Err(e) = self.store.tags().delete(recv_tag(root)).await {
+            warn_about(&self.events, "freeing a forgotten offer's data", e);
+        }
+        Ok(())
     }
 
     /// Writes a share held in our store into the existing folder `dest`.

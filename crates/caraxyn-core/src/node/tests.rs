@@ -1552,6 +1552,38 @@ async fn a_declined_offer_stays_declined_and_unknown_offers_are_errors() {
 }
 
 #[tokio::test]
+async fn a_forgotten_offer_frees_its_data_and_comes_back_as_new() {
+    let lookup = MemoryLookup::new();
+    let (a, b) = (offline_node(&lookup).await, offline_node(&lookup).await);
+    befriend(&a.node, &b.node).await;
+    let (_src, path) = write_file("x.txt", b"x");
+    let recipients = [b.node.peer_id()];
+    let root = a.node.share_file(&path, &recipients, None).await.unwrap();
+    wait_for_inbox(&b.node, 1).await;
+    // Downloaded but never saved: its copy waits in the store under a tag.
+    b.node.fetch(a.node.peer_id(), root).await.unwrap();
+    b.node.decline(a.node.peer_id(), root).unwrap();
+
+    b.node.forget_offer(a.node.peer_id(), root).await.unwrap();
+
+    assert!(b.node.inbox().unwrap().is_empty());
+    assert_eq!(
+        b.node.store.tags().delete_all().await.unwrap(),
+        0,
+        "tag freed"
+    );
+    assert!(matches!(
+        b.node.forget_offer(a.node.peer_id(), root).await,
+        Err(Error::UnknownOffer)
+    ));
+    a.node.share_file(&path, &recipients, None).await.unwrap();
+    wait_for_inbox(&b.node, 1).await;
+    assert_eq!(b.node.inbox().unwrap()[0].state, OfferState::New);
+    a.node.shutdown().await.unwrap();
+    b.node.shutdown().await.unwrap();
+}
+
+#[tokio::test]
 async fn offers_from_strangers_and_hostile_offers_are_refused() {
     let lookup = MemoryLookup::new();
     let (a, b, c) = (
