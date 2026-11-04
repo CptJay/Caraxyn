@@ -1382,6 +1382,11 @@ async fn shares_and_their_recipients_survive_a_restart() {
 
     let a = node_in(dir.path(), &lookup).await;
 
+    let shares = a.shares().unwrap();
+    assert_eq!(shares.len(), 1);
+    assert_eq!(shares[0].root, root);
+    assert_eq!(shares[0].title, "x.txt");
+    assert_eq!(shares[0].recipients, [b.node.peer_id()]);
     assert!(can_fetch(&b.node, &a, root).await);
     assert!(!can_fetch(&c.node, &a, root).await);
     a.shutdown().await.unwrap();

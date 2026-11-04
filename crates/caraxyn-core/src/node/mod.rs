@@ -46,7 +46,7 @@ use crate::{
     events::{EVENT_BUFFER, Event, tell, warn_about},
     ids::{ContentHash, PeerId},
     safe_name,
-    shares::{Offer, OfferState, PREVIEW_LEN},
+    shares::{MyShare, Offer, OfferState, PREVIEW_LEN},
 };
 
 /// Background timing; tests use shorter values to see things happen.
@@ -681,6 +681,29 @@ impl Node {
             }
             None => Err(Error::UnknownShare),
         }
+    }
+
+    /// Every share we made, including revoked and expired ones.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Database`] if the shares cannot be read.
+    pub fn shares(&self) -> Result<Vec<MyShare>, Error> {
+        Ok(self
+            .access
+            .db()
+            .shares()?
+            .into_iter()
+            .map(|(root, share)| MyShare {
+                root,
+                title: share.title,
+                recipients: share.recipients,
+                file_count: share.file_count,
+                total_size: share.total_size,
+                revoked_at: share.revoked_at,
+                expires_at: share.expires_at,
+            })
+            .collect())
     }
 
     /// Every share offered to us, in any state.
