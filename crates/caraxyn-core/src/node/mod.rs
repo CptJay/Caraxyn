@@ -26,7 +26,8 @@ use iroh_blobs::{
     format::collection::Collection,
     hashseq::HashSeq,
     provider::events::{
-        AbortReason, ConnectMode, EventMask, EventSender, ObserveMode, ProviderMessage, RequestMode,
+        AbortReason, ConnectMode, EventMask, EventSender, ObserveMode, ProviderMessage,
+        RequestMode, RequestUpdate,
     },
     store::{
         GcConfig,
@@ -195,7 +196,8 @@ impl Node {
             16,
             EventMask {
                 connected: ConnectMode::Intercept,
-                get: RequestMode::Intercept,
+                // Log: also a stream of what is sent, for upload progress.
+                get: RequestMode::InterceptLog,
                 // Batch requests would bypass the per-hash check, so they are refused outright.
                 get_many: RequestMode::Disabled,
                 observe: ObserveMode::Intercept,
@@ -203,9 +205,9 @@ impl Node {
             },
         );
         // Ends by itself when the router (and with it the sender) is dropped.
-        tokio::spawn(run_blob_gate(Arc::clone(&access), requests));
         let postman = Arc::new(Notify::new());
         let (events, _) = broadcast::channel(EVENT_BUFFER);
+        tokio::spawn(run_blob_gate(Arc::clone(&access), requests, events.clone()));
         let router = Router::builder(endpoint)
             .accept(
                 iroh_blobs::ALPN,
@@ -962,6 +964,7 @@ fn check_name(name: &str) -> Result<(), Error> {
 async fn run_blob_gate(
     access: Arc<access::Access>,
     mut requests: tokio::sync::mpsc::Receiver<ProviderMessage>,
+    events: broadcast::Sender<Event>,
 ) {
     let verdict = |ok: bool| {
         if ok {
@@ -991,11 +994,44 @@ async fn run_blob_gate(
             // stays open must not get anything new on it.
             ProviderMessage::GetRequestReceived(m) => {
                 let as_list = !m.request.ranges.is_blob();
-                let ok = peers.get(&m.connection_id).is_some_and(|peer| {
-                    access.is_allowed(*peer)
-                        && access.may_get(*peer, m.request.hash.into(), as_list)
+                let hash = ContentHash::from(m.request.hash);
+                let peer = peers.get(&m.connection_id).copied().filter(|peer| {
+                    access.is_allowed(*peer) && access.may_get(*peer, hash, as_list)
                 });
-                m.tx.send(verdict(ok)).await.ok();
+                m.tx.send(verdict(peer.is_some())).await.ok();
+                if let Some(to) = peer {
+                    // A share is fetched with one request for its root: that one is the upload.
+                    let total = as_list.then(|| access.share_size(hash)).flatten();
+                    let events = events.clone();
+                    let mut updates = m.rx;
+                    // Every update is read to the end: iroh-blobs stops sending
+                    // once nobody reads them, which would cut the download.
+                    tokio::spawn(async move {
+                        let (mut sent, mut last_told) = (SentBytes::default(), None::<Instant>);
+                        while let Ok(Some(update)) = updates.recv().await {
+                            let bytes = sent.update(&update);
+                            let finished = matches!(
+                                update,
+                                RequestUpdate::Completed(_) | RequestUpdate::Aborted(_)
+                            );
+                            let Some(total) = total else { continue };
+                            if finished || last_told.is_none_or(|at| at.elapsed() >= PROGRESS_EVERY)
+                            {
+                                tell(
+                                    &events,
+                                    Event::Upload {
+                                        to,
+                                        root: hash,
+                                        bytes,
+                                        total,
+                                        finished,
+                                    },
+                                );
+                                last_told = Some(Instant::now());
+                            }
+                        }
+                    });
+                }
             }
             // "Do you have this?" reveals what is in the store, so the same rule applies.
             ProviderMessage::ObserveRequestReceived(m) => {
@@ -1037,6 +1073,31 @@ async fn watch_net_status(
             _ = stop.changed() => return,
             else => return,
         }
+    }
+}
+
+/// Adds up what one request we serve has sent so far, from iroh-blobs' log:
+/// each blob starts, then reports how far into it the sending has got.
+#[derive(Debug, Default)]
+struct SentBytes {
+    /// Blobs already done.
+    finished: u64,
+    /// How far into the current blob.
+    current: u64,
+}
+
+impl SentBytes {
+    /// Takes one update and returns the bytes sent so far.
+    fn update(&mut self, update: &RequestUpdate) -> u64 {
+        match update {
+            RequestUpdate::Started(_) => {
+                self.finished += self.current;
+                self.current = 0;
+            }
+            RequestUpdate::Progress(progress) => self.current = progress.end_offset,
+            RequestUpdate::Completed(_) | RequestUpdate::Aborted(_) => {}
+        }
+        self.finished + self.current
     }
 }
 

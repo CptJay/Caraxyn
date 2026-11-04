@@ -87,6 +87,21 @@ pub enum Event {
         /// The new status.
         status: NetStatus,
     },
+    /// A contact is downloading one of our shares (at most a few times per
+    /// second, and once at the end with `finished`).
+    Upload {
+        /// Who is downloading.
+        to: PeerId,
+        /// The share.
+        root: ContentHash,
+        /// Bytes sent so far in this download. A resumed download only sends
+        /// what is missing, so it may end below `total`.
+        bytes: u64,
+        /// The share's total size.
+        total: u64,
+        /// The download ended (done, or cut off).
+        finished: bool,
+    },
     /// A download is under way (at most a few times per second, and once at the end).
     Progress {
         /// Who it comes from.
