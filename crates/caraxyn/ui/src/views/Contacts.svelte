@@ -2,13 +2,14 @@
   import ContactRow from '../components/ContactRow.svelte';
   import EmptyState from '../components/EmptyState.svelte';
   import InvitePanel from '../components/InvitePanel.svelte';
+  import PageHeader from '../components/PageHeader.svelte';
   import RedeemForm from '../components/RedeemForm.svelte';
   import { app, createInvite, redeemInvite, removeContact } from '../lib/state.svelte';
 
   const sorted = $derived([...app.contacts].sort((a, b) => a.name.localeCompare(b.name)));
 </script>
 
-<h1 class="mb-4 text-lg font-semibold">Contacts</h1>
+<PageHeader title="Contacts" />
 
 <div class="mb-6 grid gap-3 md:grid-cols-2">
   <InvitePanel oncreate={createInvite} />

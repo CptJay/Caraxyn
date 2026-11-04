@@ -1,4 +1,5 @@
 <script lang="ts">
+  import PageHeader from '../components/PageHeader.svelte';
   import PathPicker from '../components/PathPicker.svelte';
   import type { Settings } from '../lib/api';
   import { openLogFolder, saveSettings } from '../lib/state.svelte';
@@ -20,7 +21,7 @@
   }
 </script>
 
-<h1 class="mb-4 text-lg font-semibold">Settings</h1>
+<PageHeader title="Settings" />
 
 <form class="card max-w-xl space-y-4" onsubmit={submit} oninput={() => (saved = false)}>
   <label class="block space-y-1">

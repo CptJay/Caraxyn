@@ -1,6 +1,7 @@
 <script lang="ts">
   import EmptyState from '../components/EmptyState.svelte';
   import OfferCard from '../components/OfferCard.svelte';
+  import PageHeader from '../components/PageHeader.svelte';
   import type { Offer } from '../lib/api';
   import { accept, app, contactName, decline, forgetOffer, pairKey, pickPath } from '../lib/state.svelte';
 
@@ -30,7 +31,7 @@
   </div>
 {/snippet}
 
-<h1 class="mb-4 text-lg font-semibold">Inbox</h1>
+<PageHeader title="Inbox" />
 {#if app.inbox.length === 0}
   <EmptyState title="Nothing here yet" hint="When a contact shares something with you, it shows up here." />
 {:else}

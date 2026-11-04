@@ -1,5 +1,6 @@
 <script lang="ts">
   import EmptyState from '../components/EmptyState.svelte';
+  import PageHeader from '../components/PageHeader.svelte';
   import ShareRow from '../components/ShareRow.svelte';
   import type { Share } from '../lib/api';
   import { app, contactName, forgetShare, recipientState, revoke, setExpiry } from '../lib/state.svelte';
@@ -14,12 +15,11 @@
     share.recipients.map((peer) => ({ peer, name: contactName(peer), ...recipientState(share, peer) }));
 </script>
 
-<div class="mb-4 flex items-center justify-between">
-  <h1 class="text-lg font-semibold">My shares</h1>
+<PageHeader title="My shares">
   {#if !creating}
     <button class="btn btn-primary" onclick={() => (creating = true)}>New share</button>
   {/if}
-</div>
+</PageHeader>
 
 <div class="space-y-3">
   {#if creating}
