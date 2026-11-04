@@ -22,7 +22,7 @@ use data_encoding::BASE32_NOPAD;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use crate::ids::PeerId;
+use crate::{ids::PeerId, safe_name};
 
 /// Start of every invite code; the `1` is the format version.
 const PREFIX: &str = "caraxyn1:";
@@ -87,8 +87,8 @@ pub enum InviteError {
     /// The code is damaged or incomplete.
     #[error("the invite code is damaged or incomplete")]
     Malformed,
-    /// The name is empty, too long or contains control characters.
-    #[error("the name must be 1 to 64 characters, without control characters")]
+    /// The name is empty, too long or contains control or text-direction characters.
+    #[error("the name must be 1 to 64 characters, without control or text-direction characters")]
     BadName,
     /// The invite is older than 24 hours.
     #[error("the invite has expired")]
@@ -168,7 +168,10 @@ pub(crate) fn now_ms() -> u64 {
 pub(crate) fn check_name(name: &str) -> Result<(), InviteError> {
     let ok = !name.trim().is_empty()
         && name.chars().count() <= MAX_NAME_CHARS
-        && !name.chars().any(char::is_control);
+        // Direction marks could make the name show reversed, or look like another contact's.
+        && !name
+            .chars()
+            .any(|c| c.is_control() || safe_name::is_direction_mark(c));
     if ok {
         Ok(())
     } else {
@@ -231,6 +234,7 @@ mod tests {
             "   ",
             "a\nb",
             "bell\u{7}",
+            "yaJ\u{202E}",
             &"x".repeat(MAX_NAME_CHARS + 1),
         ] {
             assert_eq!(

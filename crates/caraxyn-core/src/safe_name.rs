@@ -44,7 +44,7 @@ pub enum NameError {
 
 /// Invisible characters that change the direction text is shown in. In a name
 /// they disguise it: `invoice\u{202E}fdp.exe` shows as `invoiceexe.pdf`.
-fn is_direction_mark(c: char) -> bool {
+pub(crate) fn is_direction_mark(c: char) -> bool {
     matches!(c, '\u{061C}' | '\u{200E}' | '\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}')
 }
 

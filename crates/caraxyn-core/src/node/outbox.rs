@@ -167,6 +167,8 @@ impl Node {
                 let delivery = node.deliver(entry).await;
                 if let Err(e) = node.record(entry, delivery) {
                     warn_about(&node.events, "updating the outbox", e);
+                    // The entry still looks due; without a pause it would be sent again at once.
+                    tokio::time::sleep(node.timing.retry_first).await;
                 }
             });
         }
