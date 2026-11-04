@@ -13,6 +13,7 @@
     onaccept,
     onacceptelsewhere,
     ondecline,
+    onremove,
   }: {
     offer: Offer;
     sender: string;
@@ -20,6 +21,7 @@
     onaccept: () => void;
     onacceptelsewhere: () => void;
     ondecline: () => void;
+    onremove: () => void;
   } = $props();
 
   const STATE_LABEL = { new: 'New', declined: 'Declined', done: 'Saved', revoked: 'Withdrawn' };
@@ -54,6 +56,10 @@
       {#if expired}
         <p class="basis-full text-xs text-warn">Expired: the sender may no longer have it. Accept still tries.</p>
       {/if}
+    </footer>
+  {:else}
+    <footer>
+      <ConfirmButton label="Remove" confirmLabel="Remove from inbox" onconfirm={onremove} />
     </footer>
   {/if}
 </article>

@@ -161,6 +161,13 @@ export async function decline(offer: Offer): Promise<void> {
   });
 }
 
+export async function forgetOffer(offer: Offer): Promise<void> {
+  await attempt(async () => {
+    await api.forgetOffer(offer.from, offer.root);
+    app.inbox = await api.inbox();
+  });
+}
+
 // Shares
 
 export async function share(path: string, recipients: PeerId[], expiresAt: Millis | null): Promise<boolean> {

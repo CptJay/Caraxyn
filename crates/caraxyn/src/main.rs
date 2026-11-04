@@ -90,6 +90,7 @@ fn main() {
             commands::inbox,
             commands::accept,
             commands::decline,
+            commands::forget_offer,
             commands::shares,
             commands::pending_offers,
             commands::share,

@@ -2,7 +2,7 @@
   import EmptyState from '../components/EmptyState.svelte';
   import OfferCard from '../components/OfferCard.svelte';
   import type { Offer } from '../lib/api';
-  import { accept, app, contactName, decline, pairKey, pickPath } from '../lib/state.svelte';
+  import { accept, app, contactName, decline, forgetOffer, pairKey, pickPath } from '../lib/state.svelte';
 
   const byNewest = (a: Offer, b: Offer) => b.receivedAt - a.receivedAt;
   const fresh = $derived(app.inbox.filter((o) => o.state === 'new').sort(byNewest));
@@ -24,6 +24,7 @@
         onaccept={() => accept(offer)}
         onacceptelsewhere={() => acceptElsewhere(offer)}
         ondecline={() => decline(offer)}
+        onremove={() => forgetOffer(offer)}
       />
     {/each}
   </div>

@@ -18,10 +18,21 @@ pub struct Settings {
 const FILE: &str = "settings.json";
 
 impl Settings {
-    /// Reads the settings, or the defaults if there is no file yet.
+    /// Reads the settings, or the defaults if there is no file yet. A file
+    /// that is not valid settings is moved to `settings.json.broken` and the
+    /// defaults are used, so the next save cannot overwrite what was in it.
     pub fn load(data_dir: &Path) -> std::io::Result<Self> {
-        match std::fs::read(data_dir.join(FILE)) {
-            Ok(bytes) => serde_json::from_slice(&bytes).map_err(std::io::Error::other),
+        let path = data_dir.join(FILE);
+        match std::fs::read(&path) {
+            Ok(bytes) => match serde_json::from_slice(&bytes) {
+                Ok(settings) => Ok(settings),
+                Err(e) => {
+                    let aside = data_dir.join(format!("{FILE}.broken"));
+                    std::fs::rename(&path, &aside)?;
+                    tracing::warn!(%e, path = %aside.display(), "settings unreadable, moved aside");
+                    Ok(Self::default())
+                }
+            },
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Self::default()),
             Err(e) => Err(e),
         }
@@ -51,5 +62,18 @@ mod tests {
         };
         settings.save(dir).unwrap();
         assert_eq!(Settings::load(dir).unwrap(), settings);
+    }
+
+    #[test]
+    fn a_broken_file_is_kept_aside_and_defaults_are_used() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let dir = dir.path();
+        std::fs::write(dir.join(FILE), b"{ not json").unwrap();
+
+        assert_eq!(Settings::load(dir).unwrap(), Settings::default());
+        Settings::default().save(dir).unwrap();
+
+        let kept = std::fs::read(dir.join("settings.json.broken")).unwrap();
+        assert_eq!(kept, b"{ not json");
     }
 }

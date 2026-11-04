@@ -148,6 +148,14 @@ pub async fn decline(state: State<'_, AppState>, from: String, root: String) -> 
 }
 
 #[tauri::command]
+pub async fn forget_offer(state: State<'_, AppState>, from: String, root: String) -> Result<()> {
+    Ok(state
+        .node()?
+        .forget_offer(from.parse()?, root.parse()?)
+        .await?)
+}
+
+#[tauri::command]
 pub async fn shares(state: State<'_, AppState>) -> Result<Vec<ShareDto>> {
     Ok(state
         .node()?

@@ -92,6 +92,8 @@ export const api = {
   accept: (from: PeerId, root: ContentHash, dest: string) =>
     invoke<string[]>('accept', { from, root, dest }),
   decline: (from: PeerId, root: ContentHash) => invoke<void>('decline', { from, root }),
+  /** Removes a finished offer from the inbox, and frees its unsaved data. */
+  forgetOffer: (from: PeerId, root: ContentHash) => invoke<void>('forget_offer', { from, root }),
 
   shares: () => invoke<Share[]>('shares'),
   pendingOffers: () => invoke<PendingOffer[]>('pending_offers'),
