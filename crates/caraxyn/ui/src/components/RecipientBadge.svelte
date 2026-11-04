@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { formatSpeed, formatTimeLeft } from '../lib/format';
+  import { formatSpeed, formatTimeLeft, RELAY_HINT, routeLabel } from '../lib/format';
   import type { RecipientState } from '../lib/state.svelte';
   import { secondsLeft, type Transfer } from '../lib/transfer';
 
@@ -13,6 +13,17 @@
   // A resumed download sends only what is missing, so it can end below 100%.
   const percent = $derived(upload?.total ? Math.min(100, Math.round((upload.bytes / upload.total) * 100)) : 0);
   const left = $derived(upload ? secondsLeft(upload) : null);
+  // Tooltip while uploading: time left and how the connection goes.
+  const tip = $derived(
+    upload
+      ? [
+          left !== null ? formatTimeLeft(left) : null,
+          upload.direct === false ? RELAY_HINT : routeLabel(upload.direct),
+        ]
+          .filter(Boolean)
+          .join(' · ') || undefined
+      : undefined,
+  );
 
   const LABEL: Record<RecipientState, string> = {
     pending: 'waiting to deliver',
@@ -32,7 +43,7 @@
 
 <span
   class="relative inline-flex h-6 items-center gap-1.5 overflow-hidden rounded-lg border border-outline px-2 text-xs"
-  title={upload && left !== null ? formatTimeLeft(left) : undefined}
+  title={tip}
 >
   <span class="font-medium">{name}</span>
   {#if upload}

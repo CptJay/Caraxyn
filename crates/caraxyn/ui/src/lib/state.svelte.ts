@@ -109,14 +109,15 @@ export function applyEvent(event: NodeEvent): void {
         delete app.uploads[key];
       } else {
         const now = performance.now();
-        app.uploads[key] = advance(app.uploads[key] ?? startTransfer(event.total, now), event.bytes, event.total, now);
+        const running = app.uploads[key] ?? startTransfer(event.total, now);
+        app.uploads[key] = advance(running, event.bytes, event.total, now, event.direct);
       }
       break;
     }
     case 'progress': {
       const key = pairKey(event.from, event.root);
       const running = app.downloads[key];
-      if (running) app.downloads[key] = advance(running, event.bytes, event.total, performance.now());
+      if (running) app.downloads[key] = advance(running, event.bytes, event.total, performance.now(), event.direct);
       break;
     }
     case 'warning':

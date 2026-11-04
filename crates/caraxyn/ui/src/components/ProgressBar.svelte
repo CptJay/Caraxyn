@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { formatBytes, formatSpeed, formatTimeLeft } from '../lib/format';
+  import { formatBytes, formatSpeed, formatTimeLeft, RELAY_HINT, routeLabel } from '../lib/format';
   import { secondsLeft, type Transfer } from '../lib/transfer';
 
   let { transfer }: { transfer: Transfer } = $props();
@@ -23,6 +23,12 @@
     {formatBytes(bytes)}{total ? ` of ${formatBytes(total)}` : ''}{percent !== null ? ` · ${percent}%` : ''}
     {#if transfer.speed !== null}
       · {formatSpeed(transfer.speed)}{left !== null ? ` · ${formatTimeLeft(left)}` : ''}
+    {/if}
+    {#if transfer.direct !== null}
+      ·
+      <span class={transfer.direct ? '' : 'text-warn'} title={transfer.direct ? undefined : RELAY_HINT}>
+        {routeLabel(transfer.direct)}
+      </span>
     {/if}
   </p>
 </div>
