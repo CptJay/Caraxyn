@@ -3,7 +3,7 @@
   import PathPicker from '../components/PathPicker.svelte';
   import FormSection from '../components/FormSection.svelte';
   import { api, type Settings } from '../lib/api';
-  import { openLogFolder, saveSettings } from '../lib/state.svelte';
+  import { attempt, checkForUpdate, openLogFolder, saveSettings } from '../lib/state.svelte';
 
   let {
     settings,
@@ -30,6 +30,17 @@
   // A picked folder is saved at once: there is nothing else to fill in.
   async function saveFolder(folder: string) {
     folderSaved = await saveSettings({ ...settings, downloadDir: folder });
+  }
+
+  /** What the last "Check for updates" found; the banner offers the install. */
+  let updateResult = $state<string | null>(null);
+
+  async function checkUpdates() {
+    updateResult = null;
+    await attempt(async () => {
+      const version = await checkForUpdate();
+      updateResult = version ? `Caraxyn ${version} is available.` : 'You have the newest version.';
+    });
   }
 
   // A switch is saved at once, like the folder; if that fails it flips back.
@@ -93,5 +104,9 @@
       <dt class="text-muted">Made by</dt>
       <dd>CptJay</dd>
     </dl>
+    <div class="flex items-center gap-3">
+      <button class="btn" onclick={checkUpdates}>Check for updates</button>
+      {#if updateResult}<span class="text-sm text-muted">{updateResult}</span>{/if}
+    </div>
   </FormSection>
 </div>

@@ -56,9 +56,11 @@ Build an installable release:
 ui/node_modules/.bin/tauri build
 ```
 
-This makes an AppImage on Linux and an NSIS installer (`.exe`) on Windows, in `target/release/bundle/`.
+This makes an AppImage on Linux and an NSIS installer (`.exe`) on Windows, in `target/release/bundle/`. Release builds are signed for the auto-updater; without the signing key, build with `--config '{"bundle":{"createUpdaterArtifacts":false}}'`.
 
 ### Releasing
+
+Once, before the first release: create the updater signing key with `ui/node_modules/.bin/tauri signer generate -w ~/.tauri/caraxyn.key`, put the **public** key (`caraxyn.key.pub`) in `tauri.conf.json` under `plugins.updater.pubkey`, and add two repository secrets (GitHub → Settings → Secrets and variables → Actions): `TAURI_SIGNING_PRIVATE_KEY` (the contents of `caraxyn.key`) and `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`. Back the key up: without it, installed apps can never update again.
 
 1. Bump `version` in the root `Cargo.toml` (the app takes its version from there) and run `cargo check` so `Cargo.lock` follows.
 2. Merge that into `main`, then tag it and push the tag:
@@ -67,8 +69,8 @@ This makes an AppImage on Linux and an NSIS installer (`.exe`) on Windows, in `t
    git tag v0.2.0 && git push origin v0.2.0
    ```
 
-3. The Release workflow checks the tag matches the version, builds both installers and attaches them to a **draft** GitHub Release.
-4. Check the draft, edit the notes, and press Publish.
+3. The Release workflow checks the tag matches the version, builds and signs both installers and attaches them, with `latest.json`, to a **draft** GitHub Release.
+4. Check the draft, edit the notes, and press Publish. Installed apps look at the newest published release when they start and every 6 hours, and offer the update.
 
 The Windows installer is not signed yet, so Windows SmartScreen warns about an unknown publisher the first time it runs ("More info" → "Run anyway").
 

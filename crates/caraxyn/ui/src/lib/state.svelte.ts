@@ -46,7 +46,12 @@ export const app = $state({
   error: null as string | null,
   /** Problems in background work, newest last. */
   warnings: [] as string[],
+  /** A newer version that can be installed, if one was found. */
+  update: null as string | null,
 });
+
+/** How often a running app looks for a new version. */
+const UPDATE_CHECK_MS = 6 * 60 * 60 * 1000;
 
 export async function init(): Promise<void> {
   try {
@@ -56,6 +61,10 @@ export async function init(): Promise<void> {
       await onResync(() => inBackground(reload()));
       await reload();
     }
+    // Quietly: offline, or no published release yet, is not worth a banner.
+    const lookQuietly = () => checkForUpdate().catch((e) => console.warn('update check failed', e));
+    lookQuietly();
+    setInterval(lookQuietly, UPDATE_CHECK_MS);
   } catch (e) {
     app.error = errorText(e);
   } finally {
@@ -239,6 +248,17 @@ export async function removeContact(peer: PeerId): Promise<void> {
     await refreshShares();
   });
 }
+
+// Updates
+
+/** Looks for a newer version; sets `app.update` and returns it, or `null`. Throws when the check fails. */
+export async function checkForUpdate(): Promise<string | null> {
+  app.update = await api.checkUpdate();
+  return app.update;
+}
+
+/** Installs `app.update`; on success the app restarts, so this only returns on failure. */
+export const installUpdate = (): Promise<boolean> => attempt(api.installUpdate);
 
 // Settings
 

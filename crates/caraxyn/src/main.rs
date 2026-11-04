@@ -9,6 +9,7 @@ mod dto;
 mod error;
 mod events;
 mod settings;
+mod updates;
 
 use std::{
     path::{Path, PathBuf},
@@ -37,6 +38,7 @@ fn main() {
     }
     let app = builder
         .plugin(tauri_plugin_notification::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
         .setup(|app| {
@@ -125,6 +127,8 @@ fn main() {
             commands::revoke,
             commands::forget_share,
             commands::set_expiry,
+            updates::check_update,
+            updates::install_update,
         ])
         .build(tauri::generate_context!())
         .expect("failed to build the app");

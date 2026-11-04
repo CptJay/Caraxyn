@@ -60,8 +60,40 @@ jobs:
       - run: ui/node_modules/.bin/tauri build --ci --bundles ${{ matrix.bundle }} -- --locked
         shell: bash
         working-directory: crates/caraxyn
+        # Signs the installer for the updater (a .sig next to it); the public key is in tauri.conf.json.
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
       - name: Upload to the draft
         shell: bash
-        run: gh release upload "$GITHUB_REF_NAME" target/release/bundle/${{ matrix.bundle }}/*.${{ matrix.file }} --clobber
+        run: gh release upload "$GITHUB_REF_NAME" target/release/bundle/${{ matrix.bundle }}/*.${{ matrix.file }} target/release/bundle/${{ matrix.bundle }}/*.${{ matrix.file }}.sig --clobber
+        env:
+          GH_TOKEN: ${{ github.token }}
+
+  # latest.json tells installed apps about this release. They read it from the newest
+  # *published* release, so a draft changes nothing until it is published.
+  manifest:
+    needs: build
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - run: gh release download "$GITHUB_REF_NAME" --pattern '*.sig' --dir sigs
+        env:
+          GH_TOKEN: ${{ github.token }}
+      - name: Write latest.json
+        shell: python
+        run: |
+          import json, os, pathlib
+          tag = os.environ["GITHUB_REF_NAME"]
+          base = f"https://github.com/{os.environ['GITHUB_REPOSITORY']}/releases/download/{tag}"
+          platforms = {}
+          for sig in pathlib.Path("sigs").glob("*.sig"):
+              installer = sig.name.removesuffix(".sig")
+              key = "linux-x86_64" if installer.endswith(".AppImage") else "windows-x86_64"
+              platforms[key] = {"signature": sig.read_text(), "url": f"{base}/{installer}"}
+          assert set(platforms) == {"linux-x86_64", "windows-x86_64"}, platforms
+          manifest = {"version": tag.removeprefix("v"), "platforms": platforms}
+          pathlib.Path("latest.json").write_text(json.dumps(manifest, indent=2))
+      - run: gh release upload "$GITHUB_REF_NAME" latest.json --clobber
         env:
           GH_TOKEN: ${{ github.token }}
