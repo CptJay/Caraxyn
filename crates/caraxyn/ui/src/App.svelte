@@ -20,6 +20,15 @@
 {#if app.loading}
   <p class="p-8 text-muted">Starting…</p>
 {:else if !app.status?.peerId}
+  <!-- A newer version may read data this one refuses (IncompatibleData). -->
+  {#if app.update}
+    <div class="space-y-4 p-8 pb-0">
+      <UpdateBanner version={app.update} oninstall={installUpdate} onlater={() => (app.update = null)} />
+      {#if app.error && app.status?.startupError}
+        <ErrorBanner message={app.error} onclose={() => (app.error = null)} />
+      {/if}
+    </div>
+  {/if}
   <Startup error={app.status?.startupError ?? app.error ?? 'Unknown error'} dataDir={app.status?.dataDir ?? ''} />
 {:else}
   <div class="flex h-full flex-col">

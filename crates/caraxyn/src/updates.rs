@@ -42,7 +42,16 @@ pub async fn install_update(app: AppHandle, state: State<'_, AppState>) -> Resul
     }
     #[cfg(not(windows))]
     let _ = state;
-    update.install(bytes).map_err(update_error)?;
+    if let Err(e) = update.install(bytes) {
+        // The node is stopped already: restart into this version so it runs again.
+        #[cfg(windows)]
+        {
+            tracing::warn!(%e, "update did not install, restarting");
+            app.restart();
+        }
+        #[cfg(not(windows))]
+        return Err(update_error(e));
+    }
     tracing::info!(version = %update.version, "update installed, restarting");
     app.restart()
 }
