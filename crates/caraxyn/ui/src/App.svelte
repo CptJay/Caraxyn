@@ -2,8 +2,9 @@
   import ErrorBanner from './components/ErrorBanner.svelte';
   import Sidebar from './components/Sidebar.svelte';
   import StatusBar from './components/StatusBar.svelte';
+  import UpdateBanner from './components/UpdateBanner.svelte';
   import WarningList from './components/WarningList.svelte';
-  import { app, init } from './lib/state.svelte';
+  import { app, init, installUpdate } from './lib/state.svelte';
   import Contacts from './views/Contacts.svelte';
   import Inbox from './views/Inbox.svelte';
   import Settings from './views/Settings.svelte';
@@ -19,6 +20,15 @@
 {#if app.loading}
   <p class="p-8 text-muted">Starting…</p>
 {:else if !app.status?.peerId}
+  <!-- A newer version may read data this one refuses (IncompatibleData). -->
+  {#if app.update}
+    <div class="space-y-4 p-8 pb-0">
+      <UpdateBanner version={app.update} oninstall={installUpdate} onlater={() => (app.update = null)} />
+      {#if app.error && app.status?.startupError}
+        <ErrorBanner message={app.error} onclose={() => (app.error = null)} />
+      {/if}
+    </div>
+  {/if}
   <Startup error={app.status?.startupError ?? app.error ?? 'Unknown error'} dataDir={app.status?.dataDir ?? ''} />
 {:else}
   <div class="flex h-full flex-col">
@@ -31,6 +41,9 @@
         ontoggle={() => (sidebarCollapsed = !sidebarCollapsed)}
       />
       <main class="flex-1 space-y-4 overflow-y-auto p-6">
+        {#if app.update}
+          <UpdateBanner version={app.update} oninstall={installUpdate} onlater={() => (app.update = null)} />
+        {/if}
         {#if app.error}
           <ErrorBanner message={app.error} onclose={() => (app.error = null)} />
         {/if}

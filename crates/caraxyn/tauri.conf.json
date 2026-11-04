@@ -25,6 +25,14 @@
   "bundle": {
     "active": true,
     "targets": ["appimage", "nsis"],
-    "icon": ["icons/32x32.png", "icons/128x128.png", "icons/128x128@2x.png", "icons/icon.icns", "icons/icon.ico"]
+    "icon": ["icons/32x32.png", "icons/128x128.png", "icons/128x128@2x.png", "icons/icon.icns", "icons/icon.ico"],
+    "createUpdaterArtifacts": true
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDFBRTY4NkNFM0JFNjlFNEUKUldST251WTd6b2JtR3FqbHBxVVR3dkFzaHNkM3RDMkgxb1hsTHlSb2pweHlBQzRSaTB4cnRJV0cK",
+      "endpoints": ["https://github.com/CptJay/Caraxyn/releases/latest/download/latest.json"],
+      "requireSignedVersion": true
+    }
   }
 }

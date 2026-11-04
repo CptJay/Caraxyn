@@ -94,6 +94,10 @@ export const api = {
   saveSettings: (settings: Settings) => invoke<void>('save_settings', { settings }),
   openLogFolder: () => invoke<void>('open_log_folder'),
   quit: () => invoke<void>('quit'),
+  /** The newer version available, or `null`. */
+  checkUpdate: () => invoke<string | null>('check_update'),
+  /** Downloads and installs it; the app restarts on success. */
+  installUpdate: () => invoke<void>('install_update'),
 
   contacts: () => invoke<Contact[]>('contacts'),
   createInvite: () => invoke<string>('create_invite'),
