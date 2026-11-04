@@ -22,7 +22,8 @@ jobs:
             echo "::error::tag $GITHUB_REF_NAME does not match Cargo.toml version $version"
             exit 1
           fi
-      - run: gh release create "$GITHUB_REF_NAME" --draft --verify-tag --generate-notes --title "Caraxyn $GITHUB_REF_NAME"
+      # Skipped when it exists, so "Re-run all jobs" works after a failed build.
+      - run: gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1 || gh release create "$GITHUB_REF_NAME" --draft --verify-tag --generate-notes --title "Caraxyn $GITHUB_REF_NAME"
         env:
           GH_TOKEN: ${{ github.token }}
 

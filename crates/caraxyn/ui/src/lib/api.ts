@@ -29,6 +29,8 @@ export interface Status {
   dataDir: string;
   settings: Settings;
   version: string;
+  /** Whether there is a tray icon; without one, closing the window quits. */
+  tray: boolean;
 }
 
 export interface Contact {

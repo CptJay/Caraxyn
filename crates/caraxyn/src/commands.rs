@@ -73,6 +73,8 @@ pub struct Status {
     settings: Settings,
     /// This app's version, from its Cargo.toml.
     version: &'static str,
+    /// Whether there is a tray icon; without one, closing the window quits.
+    tray: bool,
 }
 
 #[tauri::command]
@@ -84,6 +86,7 @@ pub fn status(state: State<'_, AppState>) -> Status {
         data_dir: state.data_dir.clone(),
         settings: state.settings(),
         version: env!("CARGO_PKG_VERSION"),
+        tray: state.tray,
     }
 }
 
