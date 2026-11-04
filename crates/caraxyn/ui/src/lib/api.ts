@@ -14,6 +14,8 @@ export type Millis = number;
 export interface Settings {
   displayName: string;
   downloadDir: string | null;
+  /** Closing the window hides it to the tray (sharing goes on); `false` quits. */
+  keepRunningInTray: boolean;
 }
 
 /** Whether contacts can reach us over the internet (through our relay server). */

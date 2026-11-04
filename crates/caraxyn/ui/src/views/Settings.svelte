@@ -26,6 +26,11 @@
   async function saveFolder(folder: string) {
     folderSaved = await saveSettings({ ...settings, downloadDir: folder });
   }
+
+  // A switch is saved at once, like the folder.
+  async function saveKeepRunning(e: Event) {
+    await saveSettings({ ...settings, keepRunningInTray: (e.currentTarget as HTMLInputElement).checked });
+  }
 </script>
 
 <PageHeader title="Settings" />
@@ -42,6 +47,16 @@
         {#if nameSaved}<span class="text-sm text-ok">Saved</span>{/if}
       </div>
     </form>
+  </FormSection>
+
+  <FormSection title="General">
+    <label class="flex items-start gap-3">
+      <input type="checkbox" class="mt-0.5" checked={settings.keepRunningInTray} onchange={saveKeepRunning} />
+      <span class="space-y-0.5">
+        <span class="block text-sm font-medium">Keep running in the tray when the window is closed</span>
+        <span class="block text-xs text-muted">Contacts can keep downloading from you and offers keep arriving.</span>
+      </span>
+    </label>
   </FormSection>
 
   <FormSection title="Storage">

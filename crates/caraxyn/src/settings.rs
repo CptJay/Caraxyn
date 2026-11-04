@@ -4,14 +4,27 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-/// What the user set in the Settings screen.
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+/// What the user set in the Settings screen. A field missing from the file
+/// (an older version wrote it) takes its value from `Default`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct Settings {
     /// The name contacts see in invites; empty until the user sets one.
     pub display_name: String,
     /// Where accepted shares are saved without asking; `None` asks each time.
     pub download_dir: Option<PathBuf>,
+    /// Closing the window hides it to the tray, so sharing goes on; `false` quits.
+    pub keep_running_in_tray: bool,
+}
+
+impl Default for Settings {
+    fn default() -> Self {
+        Self {
+            display_name: String::new(),
+            download_dir: None,
+            keep_running_in_tray: true,
+        }
+    }
 }
 
 /// File name inside the data folder.
@@ -59,9 +72,25 @@ mod tests {
         let settings = Settings {
             display_name: "Jay".into(),
             download_dir: Some(dir.join("downloads")),
+            keep_running_in_tray: false,
         };
         settings.save(dir).unwrap();
         assert_eq!(Settings::load(dir).unwrap(), settings);
+    }
+
+    #[test]
+    fn a_file_from_before_the_tray_keeps_running_in_the_tray() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let dir = dir.path();
+        std::fs::write(
+            dir.join(FILE),
+            br#"{ "displayName": "Jay", "downloadDir": null }"#,
+        )
+        .unwrap();
+
+        let settings = Settings::load(dir).unwrap();
+        assert_eq!(settings.display_name, "Jay");
+        assert!(settings.keep_running_in_tray);
     }
 
     #[test]
