@@ -90,6 +90,12 @@ impl Access {
         }
     }
 
+    /// The total size of one of our shares, if `root` is one.
+    pub(super) fn share_size(&self, root: ContentHash) -> Option<u64> {
+        let shares = self.shares.read().expect("share lock poisoned");
+        shares.roots.get(&root).map(|share| share.total_size)
+    }
+
     /// Saves a share (its recipients added to any it had), then indexes it.
     /// Returns the share as saved.
     pub(super) fn add_share(&self, root: ContentHash, share: Share) -> Result<Share, Error> {

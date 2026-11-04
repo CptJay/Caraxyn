@@ -2423,6 +2423,43 @@ async fn a_refused_offer_is_announced_as_undeliverable() {
 }
 
 #[tokio::test]
+async fn the_sender_hears_how_a_download_of_its_share_goes() {
+    let lookup = MemoryLookup::new();
+    let (a, b) = (offline_node(&lookup).await, offline_node(&lookup).await);
+    befriend(&a.node, &b.node).await;
+    let (_src, path) = write_file("big.bin", &vec![7u8; 3 << 20]);
+    let root = a
+        .node
+        .share_file(&path, &[b.node.peer_id()], None)
+        .await
+        .unwrap();
+    wait_for_inbox(&b.node, 1).await;
+    let mut a_events = a.node.events();
+
+    b.node.fetch(a.node.peer_id(), root).await.unwrap();
+
+    let done = next_event(&mut a_events, "the finished upload", |event| {
+        matches!(event, Event::Upload { finished: true, .. })
+    })
+    .await;
+    let Event::Upload {
+        to,
+        root: r,
+        bytes,
+        total,
+        ..
+    } = done
+    else {
+        unreachable!()
+    };
+    assert_eq!((to, r, total), (b.node.peer_id(), root, 3 << 20));
+    // The file plus its small list of names.
+    assert!(bytes >= 3 << 20, "sent {bytes}");
+    a.node.shutdown().await.unwrap();
+    b.node.shutdown().await.unwrap();
+}
+
+#[tokio::test]
 async fn accepting_reports_progress_up_to_the_whole_share() {
     let lookup = MemoryLookup::new();
     let (a, b) = (offline_node(&lookup).await, offline_node(&lookup).await);

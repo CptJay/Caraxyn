@@ -47,7 +47,7 @@
   <FileList preview={offer.preview} fileCount={offer.fileCount} />
 
   {#if download}
-    <ProgressBar bytes={download.bytes} total={download.total} />
+    <ProgressBar transfer={download} />
   {:else if offer.state === 'new'}
     <footer class="flex flex-wrap gap-2">
       <button class="btn btn-primary" onclick={onaccept}>Accept</button>

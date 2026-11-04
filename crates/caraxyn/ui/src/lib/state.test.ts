@@ -81,10 +81,23 @@ describe('applyEvent', () => {
     expect(app.inbox[0].state).toBe('new');
   });
 
+  it('an upload shows on its recipient while it runs and goes when it ends', () => {
+    app.uploads = {};
+    applyEvent({ type: 'upload', to: A, root: ROOT, bytes: 0, total: 10, finished: false });
+    applyEvent({ type: 'upload', to: A, root: ROOT, bytes: 4, total: 10, finished: false });
+    expect(recipientState(share(), A).upload?.bytes).toBe(4);
+    expect(recipientState(share(), B).upload).toBeUndefined();
+
+    applyEvent({ type: 'upload', to: A, root: ROOT, bytes: 10, total: 10, finished: true });
+    expect(app.uploads).toEqual({});
+    expect(recipientState(share(), A).state).toBe('delivered');
+  });
+
   it('progress only counts for downloads this window started', () => {
-    app.downloads = { [pairKey(A, ROOT)]: { bytes: 0, total: 10 } };
+    app.downloads = { [pairKey(A, ROOT)]: { bytes: 0, total: 10, speed: null, at: 0 } };
     applyEvent({ type: 'progress', from: A, root: ROOT, bytes: 4, total: 10 });
     applyEvent({ type: 'progress', from: B, root: ROOT, bytes: 9, total: 10 });
-    expect(app.downloads).toEqual({ [pairKey(A, ROOT)]: { bytes: 4, total: 10 } });
+    expect(Object.keys(app.downloads)).toEqual([pairKey(A, ROOT)]);
+    expect(app.downloads[pairKey(A, ROOT)].bytes).toBe(4);
   });
 });

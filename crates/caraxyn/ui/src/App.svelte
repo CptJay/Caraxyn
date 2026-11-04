@@ -54,6 +54,7 @@
       peerId={app.status.peerId}
       netStatus={app.status.netStatus ?? 'connecting'}
       downloads={Object.keys(app.downloads).length}
+      uploads={Object.keys(app.uploads).length}
       warnings={app.warnings.length}
     />
   </div>

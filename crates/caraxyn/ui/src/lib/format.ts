@@ -24,6 +24,19 @@ export function formatExpiry(expiresAt: Millis | null, now = Date.now()): string
   return expiresAt <= now ? 'expired' : `expires ${formatDate(expiresAt)}`;
 }
 
+export const formatSpeed = (bytesPerSecond: number): string => `${formatBytes(Math.round(bytesPerSecond))}/s`;
+
+/** "a few seconds left", "about 40 s left", "about 3 min left", "about 1 h 5 min left". */
+export function formatTimeLeft(seconds: number): string {
+  if (seconds < 10) return 'a few seconds left';
+  // Below 55 s, so rounding to 5 s never shows "60 s".
+  if (seconds < 55) return `about ${Math.round(seconds / 5) * 5} s left`;
+  const minutes = Math.max(1, Math.round(seconds / 60));
+  if (minutes < 60) return `about ${minutes} min left`;
+  const [h, m] = [Math.floor(minutes / 60), minutes % 60];
+  return m === 0 ? `about ${h} h left` : `about ${h} h ${m} min left`;
+}
+
 /** First 8 characters, like the core's `short()`. */
 export const shortId = (id: string): string => id.slice(0, 8);
 

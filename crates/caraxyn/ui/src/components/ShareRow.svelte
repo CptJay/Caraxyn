@@ -2,6 +2,7 @@
   import type { Millis, Share } from '../lib/api';
   import { formatBytes, formatExpiry } from '../lib/format';
   import type { RecipientState } from '../lib/state.svelte';
+  import type { Transfer } from '../lib/transfer';
   import ConfirmButton from './ConfirmButton.svelte';
   import ExpiryPicker from './ExpiryPicker.svelte';
   import RecipientBadge from './RecipientBadge.svelte';
@@ -14,7 +15,7 @@
     onexpiry,
   }: {
     share: Share;
-    recipients: { peer: string; name: string; state: RecipientState; attempts: number }[];
+    recipients: { peer: string; name: string; state: RecipientState; attempts: number; upload?: Transfer }[];
     onrevoke: () => void;
     onremove: () => void;
     onexpiry: (expiresAt: Millis | null) => void;
@@ -61,7 +62,7 @@
 
   <div class={['flex flex-wrap gap-1.5', revoked && 'opacity-60']}>
     {#each recipients as r (r.peer)}
-      <RecipientBadge name={r.name} state={r.state} attempts={r.attempts} />
+      <RecipientBadge name={r.name} state={r.state} attempts={r.attempts} upload={r.upload} />
     {:else}
       <span class="text-xs text-muted">no recipients left</span>
     {/each}

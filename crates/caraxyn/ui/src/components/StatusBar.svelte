@@ -8,8 +8,9 @@
     peerId,
     netStatus,
     downloads,
+    uploads,
     warnings,
-  }: { peerId: string; netStatus: NetStatus; downloads: number; warnings: number } = $props();
+  }: { peerId: string; netStatus: NetStatus; downloads: number; uploads: number; warnings: number } = $props();
 
   let copied = $state(false);
 </script>
@@ -20,5 +21,6 @@
     id {shortId(peerId)}… {copied ? '(copied)' : ''}
   </button>
   {#if downloads > 0}<span>{downloads} downloading</span>{/if}
+  {#if uploads > 0}<span>{uploads} uploading</span>{/if}
   {#if warnings > 0}<span class="text-warn">⚠ {warnings}</span>{/if}
 </footer>

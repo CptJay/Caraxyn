@@ -154,6 +154,13 @@ pub enum NodeEvent {
     NetStatus {
         status: &'static str,
     },
+    Upload {
+        to: String,
+        root: String,
+        bytes: u64,
+        total: u64,
+        finished: bool,
+    },
     Progress {
         from: String,
         root: String,
@@ -192,6 +199,19 @@ impl NodeEvent {
             },
             Event::NetStatus { status } => Self::NetStatus {
                 status: net_status_name(status),
+            },
+            Event::Upload {
+                to,
+                root,
+                bytes,
+                total,
+                finished,
+            } => Self::Upload {
+                to: to.to_string(),
+                root: root.to_string(),
+                bytes,
+                total,
+                finished,
             },
             Event::Progress {
                 from,
