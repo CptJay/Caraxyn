@@ -12,6 +12,9 @@ data="$root/target/two-instances"
 dev_url="http://localhost:5173" # build.devUrl in tauri.conf.json
 mkdir -p "$data/a" "$data/b"
 
+# Used below to wait for the dev server; without it that wait would never end.
+command -v curl >/dev/null || { echo "this script needs curl" >&2; exit 1; }
+
 [ -d "$app/ui/node_modules" ] || (cd "$app/ui" && npm ci)
 
 # On exit (Ctrl-C, or an error), stop everything this script started.

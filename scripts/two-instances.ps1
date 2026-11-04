@@ -37,9 +37,15 @@ try {
         }
     }
 
+    # Windows locks a running .exe, so "b" runs a copy: a's rebuilds on Rust changes can
+    # then replace caraxyn.exe. "b" keeps the Rust code it started with until the next run.
+    cargo build --manifest-path (Join-Path $root 'Cargo.toml') -p caraxyn
+    if ($LASTEXITCODE -ne 0) { throw 'building the app failed' }
+    $copy = Join-Path $data 'caraxyn-b.exe'
+    Copy-Item -Force (Join-Path $root 'target\debug\caraxyn.exe') $copy
+
     $env:CARAXYN_DATA_DIR = "$data\b"
-    $started += Start-Process -PassThru -NoNewWindow -WorkingDirectory $root `
-        -FilePath 'cargo' -ArgumentList 'run', '-p', 'caraxyn'
+    $started += Start-Process -PassThru -NoNewWindow -WorkingDirectory $root -FilePath $copy
 
     Wait-Process -Id ($started | ForEach-Object Id)
 } finally {
