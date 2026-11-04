@@ -56,6 +56,22 @@ Build an installable release:
 ui/node_modules/.bin/tauri build
 ```
 
+This makes an AppImage on Linux and an NSIS installer (`.exe`) on Windows, in `target/release/bundle/`.
+
+### Releasing
+
+1. Bump `version` in the root `Cargo.toml` (the app takes its version from there) and run `cargo check` so `Cargo.lock` follows.
+2. Merge that into `main`, then tag it and push the tag:
+
+   ```bash
+   git tag v0.2.0 && git push origin v0.2.0
+   ```
+
+3. The Release workflow checks the tag matches the version, builds both installers and attaches them to a **draft** GitHub Release.
+4. Check the draft, edit the notes, and press Publish.
+
+The Windows installer is not signed yet, so Windows SmartScreen warns about an unknown publisher the first time it runs ("More info" → "Run anyway").
+
 ### Two instances on one machine
 
 To try invites and shares alone, run two instances, "a" and "b", each with its own data folder (kept in `target/two-instances/`; delete it to start fresh). The windows are titled `Caraxyn (a)` and `Caraxyn (b)`. Ctrl-C stops both.

@@ -1,0 +1,62 @@
+name: Release
+
+# Pushing a tag like v0.2.0 builds the installers into a draft GitHub Release.
+# Nothing is public until someone presses Publish on the draft.
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  draft:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      # The app's version comes from the workspace Cargo.toml (tauri.conf.json has none).
+      - name: Tag matches the version
+        run: |
+          version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+          if [ "v$version" != "$GITHUB_REF_NAME" ]; then
+            echo "::error::tag $GITHUB_REF_NAME does not match Cargo.toml version $version"
+            exit 1
+          fi
+      - run: gh release create "$GITHUB_REF_NAME" --draft --verify-tag --generate-notes --title "Caraxyn $GITHUB_REF_NAME"
+        env:
+          GH_TOKEN: ${{ github.token }}
+
+  build:
+    needs: draft
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-22.04
+            bundle: appimage
+            file: AppImage
+          # Unsigned: Windows SmartScreen warns about an unknown publisher on first run.
+          - os: windows-latest
+            bundle: nsis
+            file: exe
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      # Same packages as CI; AppImage bundling also needs FUSE to run its tools.
+      - if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libwebkit2gtk-4.1-dev librsvg2-dev libayatana-appindicator3-dev libxdo-dev libfuse2
+      - run: rustup show
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: crates/caraxyn/ui/package-lock.json
+      - run: npm ci
+        working-directory: crates/caraxyn/ui
+      - run: ui/node_modules/.bin/tauri build --ci --bundles ${{ matrix.bundle }} -- --locked
+        working-directory: crates/caraxyn
+      - name: Upload to the draft
+        shell: bash
+        run: gh release upload "$GITHUB_REF_NAME" target/release/bundle/${{ matrix.bundle }}/*.${{ matrix.file }} --clobber
+        env:
+          GH_TOKEN: ${{ github.token }}
