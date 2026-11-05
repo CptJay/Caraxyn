@@ -26,7 +26,18 @@
     "active": true,
     "targets": ["appimage", "nsis"],
     "icon": ["icons/32x32.png", "icons/128x128.png", "icons/128x128@2x.png", "icons/icon.icns", "icons/icon.ico"],
-    "createUpdaterArtifacts": true
+    "createUpdaterArtifacts": true,
+    "linux": {
+      "appimage": {
+        "files": {
+          "/usr/lib/libayatana-appindicator3.so.1": "/usr/lib/x86_64-linux-gnu/libayatana-appindicator3.so.1",
+          "/usr/lib/libayatana-indicator3.so.7": "/usr/lib/x86_64-linux-gnu/libayatana-indicator3.so.7",
+          "/usr/lib/libayatana-ido3-0.4.so.0": "/usr/lib/x86_64-linux-gnu/libayatana-ido3-0.4.so.0",
+          "/usr/lib/libdbusmenu-glib.so.4": "/usr/lib/x86_64-linux-gnu/libdbusmenu-glib.so.4",
+          "/usr/lib/libdbusmenu-gtk3.so.4": "/usr/lib/x86_64-linux-gnu/libdbusmenu-gtk3.so.4"
+        }
+      }
+    }
   },
   "plugins": {
     "updater": {
