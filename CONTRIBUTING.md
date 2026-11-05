@@ -40,6 +40,8 @@ Build an installer (an AppImage on Linux, an NSIS `.exe` on Windows, in `target/
 ui/node_modules/.bin/tauri build --config '{"bundle":{"createUpdaterArtifacts":false}}'
 ```
 
+The AppImage carries its own GLib and, to match it, the tray libraries from the build machine (listed under `bundle.linux.appimage.files` in `tauri.conf.json`). Using the system's tray library instead fails on newer distributions, whose copy needs a newer GLib. Build AppImages on the oldest system you support (CI uses Ubuntu 22.04).
+
 ## Two instances on one machine
 
 To try invites and shares alone, run two instances, "a" and "b", each with its own data folder (kept in `target/two-instances/`; delete it to start fresh). The windows are titled `Caraxyn (a)` and `Caraxyn (b)`. Ctrl-C stops both.

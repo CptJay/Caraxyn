@@ -31,8 +31,17 @@ pub fn add_tray(app: &AppHandle) -> bool {
             tracing::warn!(%e, "no tray icon");
             false
         }
-        Err(_) => {
-            tracing::warn!("no tray icon: the system tray library is missing");
+        // Missing, or present but unloadable (built against a newer GLib than the AppImage ships).
+        Err(panic) => {
+            let reason = panic
+                .downcast_ref::<String>()
+                .map(String::as_str)
+                .or_else(|| panic.downcast_ref::<&str>().copied())
+                .unwrap_or("unknown");
+            tracing::warn!(
+                reason,
+                "no tray icon: the system tray library could not be loaded"
+            );
             false
         }
     }

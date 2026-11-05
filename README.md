@@ -15,7 +15,7 @@ Peer-to-peer file sharing between people who know each other. Files go directly 
 Get the latest version from the [Releases page](https://github.com/CptJay/Caraxyn/releases/latest).
 
 - **Windows:** download `Caraxyn_…_x64-setup.exe` and run it. The installer is not code-signed yet, so Windows SmartScreen warns about an unknown publisher the first time: click **More info → Run anyway**.
-- **Linux:** download `Caraxyn_…_amd64.AppImage`, make it executable (`chmod +x Caraxyn_*.AppImage`, or Properties → Allow executing) and run it. The tray icon needs AppIndicator (`libayatana-appindicator3`, included in Ubuntu); without it Caraxyn still runs, but closing the window quits it.
+- **Linux:** download `Caraxyn_…_amd64.AppImage`, make it executable (`chmod +x Caraxyn_*.AppImage`, or Properties → Allow executing) and run it. The tray icon needs a desktop that shows tray icons (on GNOME, the AppIndicator extension, included in Ubuntu); without one Caraxyn still runs, but closing the window quits it.
 
 Caraxyn updates itself: new versions are offered in the app, and an update is only installed if its signature checks out.
 
